@@ -49,6 +49,7 @@ Runs up to 4 automated trading bots simultaneously, each on its own Bitget sub-a
 - ATR-based dynamic Stop Loss and Take Profit
 - Position sizing as % of balance
 - Correlation check: max N simultaneous positions
+- Correlation-aware entry filter: the Signal Bot skips a new position that is too strongly correlated with an already-open one (configurable threshold, on by default; fails open — if correlation data is unavailable it trades as normal)
 - Win/Loss streak tracking
 - Order placement is idempotent (safe against duplicate orders on retry)
 - Grid Bot tracks its own position and only closes what it bought (bounded exposure)

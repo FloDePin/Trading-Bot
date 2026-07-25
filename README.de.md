@@ -49,6 +49,7 @@ Betreibt bis zu 4 automatisierte Trading-Bots gleichzeitig, jeder auf seinem eig
 - ATR-basierter dynamischer Stop-Loss und Take-Profit
 - Positionsgröße als % des Kontostands
 - Korrelations-Check: max. N gleichzeitige Positionen
+- Korrelations-Filter beim Einstieg: der Signal-Bot ueberspringt eine neue Position, die zu stark mit einer bereits offenen korreliert (Schwelle konfigurierbar, standardmaessig an; fail-open — bei fehlenden Korrelationsdaten wird normal weitergehandelt)
 - Win/Loss-Streak-Tracking
 - Order-Platzierung ist idempotent (sicher gegen doppelte Orders bei Wiederholung)
 - Grid Bot verfolgt seine eigene Position und schließt nur, was er gekauft hat (begrenzte Exponierung)

@@ -149,6 +149,7 @@ DEFAULT_CONFIG = {
             "use_atr_sl": True,
             "atr_sl_mult": 1.5, "atr_tp_mult": 2.5,
             "max_concurrent": 2,
+            "use_correlation_filter": True, "max_correlation": 0.85,
             "signal_threshold": 3, "check_interval": 30,
         },
         "grid": {
@@ -715,6 +716,33 @@ def compute_correlation(symbols=None, period_days=30):
     _corr_cache.update({"data": result, "ts": time.time(), "key": key})
     return result
 
+def _correlation_conflict(cand_sym, direction, corr_data, open_positions, max_corr):
+    """Gibt das Symbol einer bereits offenen Position zurueck, die zu stark mit
+    cand_sym korreliert (geballtes Risiko) - sonst None.
+    Fail-open: bei fehlenden/kaputten Daten wird NIE blockiert (return None)."""
+    try:
+        labels = (corr_data or {}).get("symbols") or []
+        matrix = (corr_data or {}).get("matrix") or []
+        cand = cand_sym.replace("USDT", "")
+        if cand not in labels:
+            return None
+        ci = labels.index(cand)
+        for osym, odir in open_positions:
+            o = osym.replace("USDT", "")
+            if o == cand or o not in labels:
+                continue
+            oi = labels.index(o)
+            corr = matrix[ci][oi]
+            # gleiche Richtung + hohe positive Korrelation  -> effektiv dieselbe Wette
+            # gegensaetzliche Richtung + stark negative Korr -> ebenfalls dieselbe Wette
+            if odir == direction and corr >= max_corr:
+                return o
+            if odir != direction and corr <= -max_corr:
+                return o
+        return None
+    except Exception:
+        return None
+
 # ─────────────────────────────────────────────
 #  TRADE-HISTORIE (alle Sub-Accounts)
 # ─────────────────────────────────────────────
@@ -1209,6 +1237,8 @@ def run_signal(flag):
     atr_sl_mult  = bc.get("atr_sl_mult", 1.5)
     atr_tp_mult  = bc.get("atr_tp_mult", 2.5)
     max_conc     = bc.get("max_concurrent", 2)
+    use_corr_filter = bc.get("use_correlation_filter", True)
+    max_corr     = float(bc.get("max_correlation", 0.85))
     thresh       = bc.get("signal_threshold", 3)
     check        = bc.get("check_interval", 30)
     fkey         = cfg.get("finnhub_key","")
@@ -1273,11 +1303,22 @@ def run_signal(flag):
             elif ssoft < 0:
                 blog("signal",f"Soft-Penalty: {ssoft:+d} (Non-US)","MACRO")
 
-            # Korrelations-Check: max. max_conc gleichzeitige Positionen
-            open_pos_count = sum(
-                1 for s in tokens
-                if pstate["bots"]["signal"]["tokens"].get(s,{}).get("position")
-            )
+            # Aktuell offene Positionen (Symbol + Richtung) fuer Limit- und Korrelations-Check
+            open_positions = []
+            for s in tokens:
+                p = pstate["bots"]["signal"]["tokens"].get(s,{}).get("position")
+                if p:
+                    open_positions.append((s, "LONG" if p.get("holdSide")=="long" else "SHORT"))
+            open_pos_count = len(open_positions)
+
+            # Korrelations-Daten einmal pro Zyklus (5-Min-Cache). Fail-open: bei Fehler None.
+            corr_data = None
+            if use_corr_filter:
+                try:
+                    corr_data = compute_correlation()
+                except Exception as e:
+                    corr_data = None
+                    blog("signal", f"Korrelations-Check nicht verfuegbar (handle normal weiter): {e}", "WARN")
 
             for sym in tokens:
                 try:
@@ -1352,6 +1393,13 @@ def run_signal(flag):
                         if open_pos_count >= max_conc:
                             blog("signal",f"{cur}: Max. Positionen ({max_conc}) erreicht – kein neuer Trade","WARN")
                             return
+                        # Korrelations-Filter: keine neue Position, die zu stark mit einer
+                        # bereits offenen zusammenhaengt (geballtes Risiko). Fail-open.
+                        if use_corr_filter and corr_data:
+                            conflict = _correlation_conflict(sym, direction, corr_data, open_positions, max_corr)
+                            if conflict:
+                                blog("signal",f"{cur}: uebersprungen – zu stark korreliert mit offener {conflict}-Position (r>={max_corr:.2f})","WARN")
+                                return
                         px = client.price(sym)
                         if px <= 0: return
                         qs   = fmt_q(sym, (trade_usdt * lever) / px)
@@ -1366,6 +1414,9 @@ def run_signal(flag):
                         })
                         if resp.get("code") == "00000":
                             open_pos_count += 1
+                            # neue Position in die Zyklus-Liste aufnehmen, damit spaetere
+                            # Symbole im selben Zyklus den Korrelations-Check gegen sie sehen
+                            open_positions.append((sym, direction))
                             with plock:
                                 pstate["bots"]["signal"]["trade_count"] += 1
                             blog("signal",f"{cur}: {direction} @ {px:.2f} | SL={sl:.2f} TP={tp:.2f} ({trade_usdt:.0f} USDT)","TRADE")
@@ -1381,6 +1432,7 @@ def run_signal(flag):
                                 "tradeSide":"close","orderType":"market","force":"ioc",
                             })
                             open_pos_count = max(0, open_pos_count - 1)
+                            open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
                             blog("signal",f"{cur}: Position gedreht","TRADE")
                             if not blackout: _open(sig)
                     else:
@@ -1401,6 +1453,7 @@ def run_signal(flag):
                                 pstate["bots"]["signal"].update({
                                     "win_streak":win_streak, "loss_streak":loss_streak})
                             open_pos_count = max(0, open_pos_count - 1)
+                            open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
                         if sig in ("LONG","SHORT") and not blackout:
                             _open(sig)
                     with plock:
@@ -2887,6 +2940,9 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label>Risiko pro Trade (%)</label><input type="number" id="sig-risk-pct" placeholder="3.0" step="0.5" min="0.5" max="10"></div>
         <div class="field-row"><label>USDT pro Trade (fallback)</label><input type="number" id="sig-usdt" placeholder="30" min="5"></div>
         <div class="field-row"><label>Max. gleichzeitige Pos.</label><input type="number" id="sig-max-conc" placeholder="2" min="1" max="4"></div>
+        <div class="field-row"><label>Korrelations-Filter</label><input type="checkbox" id="sig-corr-filter" style="width:auto"></div>
+        <div class="field-row"><label>Max. Korrelation (0.5-1.0)</label><input type="number" id="sig-max-corr" placeholder="0.85" step="0.05" min="0.5" max="1.0"></div>
+        <div class="settings-note">Korrelations-Filter: verhindert, dass der Bot eine neue Position eroeffnet, die zu stark mit einer bereits offenen, gleichgerichteten Position korreliert (Diversifikation). Bei fehlenden Daten wird normal weitergehandelt.</div>
         <div class="field-row"><label>Signal-Schwelle (2-5)</label><input type="number" id="sig-thresh" placeholder="3" min="2" max="5"></div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('signal')">Verbindung testen</button>
@@ -4940,6 +4996,8 @@ function fillSettingsForm(state) {
     document.getElementById('sig-risk-pct').value   = s(b.signal?.risk_pct||3.0);
     document.getElementById('sig-usdt').value        = s(b.signal?.usdt_per_trade||30);
     document.getElementById('sig-max-conc').value    = s(b.signal?.max_concurrent||2);
+    document.getElementById('sig-corr-filter').checked = (b.signal?.use_correlation_filter !== false);
+    document.getElementById('sig-max-corr').value    = s(b.signal?.max_correlation ?? 0.85);
     document.getElementById('sig-thresh').value = s(b.signal?.signal_threshold||3);
     document.getElementById('grd-key').value   = s(b.grid?.api_key);
     document.getElementById('grd-sym').value   = s(b.grid?.symbol||'BTCUSDT');
@@ -4979,6 +5037,8 @@ async function saveSettings() {
         use_risk_pct:     true,
         usdt_per_trade:   num('sig-usdt')     || 30,
         max_concurrent:   int('sig-max-conc') || 2,
+        use_correlation_filter: document.getElementById('sig-corr-filter')?.checked ?? true,
+        max_correlation:  num('sig-max-corr') || 0.85,
         signal_threshold: int('sig-thresh')   || 3,
       },
       grid: {
