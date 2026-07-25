@@ -65,6 +65,7 @@ Runs up to 4 automated trading bots simultaneously, each on its own Bitget sub-a
 - Trade History with win rate summary
 - Backtesting: up to 730 days, walk-forward, Sharpe ratio, fee-adjusted
 - Multi-symbol backtest comparison
+- Correlation Matrix heatmap — daily-return correlation across your Signal Bot coins, so you can see at a glance whether your positions are actually diversified or all moving together (uses public market data, works without API keys)
 - Trade Timing Analysis heatmap
 - Alerts via Telegram and/or Discord
 - Bilingual: Deutsch / English

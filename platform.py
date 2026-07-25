@@ -649,6 +649,73 @@ def fetch_market_overview():
         log.debug(f"Market: {e}"); return _market_cache["data"]
 
 # ─────────────────────────────────────────────
+#  KORRELATIONS-MATRIX (Diversifikations-Check)
+# ─────────────────────────────────────────────
+_corr_cache = {"data": None, "ts": 0, "key": ""}
+
+def _public_daily_closes(symbol, limit):
+    """Holt taegliche Schlusskurse ueber die oeffentliche Bitget-API (kein Auth noetig)."""
+    try:
+        r = requests.get(f"{BASE_URL}/api/v2/mix/market/candles",
+            params={"symbol": symbol, "productType": PRODUCT_TYPE,
+                    "granularity": "1D", "limit": str(limit)}, timeout=10)
+        return [float(c[4]) for c in r.json().get("data", [])]
+    except Exception:
+        return []
+
+def _pearson(a, b):
+    """Pearson-Korrelationskoeffizient zweier gleich langer Listen."""
+    n = min(len(a), len(b))
+    if n < 3: return 0.0
+    a, b = a[-n:], b[-n:]
+    ma = sum(a) / n; mb = sum(b) / n
+    cov = sum((a[i]-ma) * (b[i]-mb) for i in range(n))
+    va  = sum((x-ma)**2 for x in a)
+    vb  = sum((x-mb)**2 for x in b)
+    denom = (va * vb) ** 0.5
+    return round(cov / denom, 3) if denom > 0 else 0.0
+
+def compute_correlation(symbols=None, period_days=30):
+    """Korrelationsmatrix der taeglichen Renditen fuer die gewaehlten Symbole.
+    Basiert auf oeffentlichen Marktdaten - funktioniert auch ohne API-Keys/im Demo."""
+    period_days = max(7, min(180, int(period_days)))
+    if not symbols:
+        cfg  = load_config()
+        base = ["BTCUSDT", "ETHUSDT"]
+        toks = cfg.get("bots", {}).get("signal", {}).get("tokens", [])
+        seen, symbols = set(), []
+        for s in base + list(toks):
+            if s and s not in seen:
+                seen.add(s); symbols.append(s)
+    symbols = [str(s).upper() for s in symbols][:10]
+
+    key = f"{','.join(symbols)}|{period_days}"
+    if _corr_cache["data"] and _corr_cache["key"] == key and time.time() - _corr_cache["ts"] < 300:
+        return _corr_cache["data"]
+
+    # Schlusskurse -> logarithmische Tagesrenditen
+    returns, valid = {}, []
+    for sym in symbols:
+        closes = _public_daily_closes(sym, period_days + 1)
+        if len(closes) >= 4:
+            rets = [math.log(closes[i] / closes[i-1])
+                    for i in range(1, len(closes)) if closes[i-1] > 0]
+            returns[sym] = rets
+            valid.append(sym)
+        time.sleep(0.05)
+
+    matrix = []
+    for a in valid:
+        row = [_pearson(returns[a], returns[b]) for b in valid]
+        matrix.append(row)
+
+    labels = [s.replace("USDT", "") for s in valid]
+    result = {"symbols": labels, "matrix": matrix,
+              "period_days": period_days, "count": len(valid)}
+    _corr_cache.update({"data": result, "ts": time.time(), "key": key})
+    return result
+
+# ─────────────────────────────────────────────
 #  TRADE-HISTORIE (alle Sub-Accounts)
 # ─────────────────────────────────────────────
 _trades_cache = {"data": [], "ts": 0}
@@ -2203,6 +2270,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <button class="tab" data-tab="markt" onclick="switchTab('markt')">MARKT</button>
   <button class="tab" data-tab="trades" onclick="switchTab('trades')">TRADES</button>
   <button class="tab" data-tab="backtest" onclick="switchTab('backtest')">BACKTEST</button>
+  <button class="tab" data-tab="correlation" onclick="switchTab('correlation')">KORRELATION</button>
   <button class="tab" data-tab="alerts" onclick="switchTab('alerts')">ALERTS</button>
   <button class="tab" data-tab="settings" onclick="switchTab('settings')">SETTINGS</button>
   <button id="lang-btn" onclick="toggleLang()" style="margin-left:auto;background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer;white-space:nowrap">DE / EN</button>
@@ -2632,6 +2700,35 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <div id="bt-error" style="display:none;padding:16px;color:var(--red);font-size:11px"></div>
 </div>
 
+<!-- KORRELATION -->
+<div id="panel-correlation" class="panel">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="corr_title">KORRELATIONS-MATRIX</span>
+    <div style="display:flex;gap:8px;align-items:center">
+      <label style="font-size:10px;color:var(--muted)" data-i18n="corr_period">Zeitraum</label>
+      <select id="corr-period" onchange="loadCorrelation()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:4px 8px;border-radius:4px">
+        <option value="14">14 T</option>
+        <option value="30" selected>30 T</option>
+        <option value="60">60 T</option>
+        <option value="90">90 T</option>
+      </select>
+      <button class="btn" onclick="loadCorrelation()" style="--accent:var(--signal);padding:5px 12px" data-i18n="corr_refresh">Aktualisieren</button>
+    </div>
+  </div>
+  <div style="font-size:10px;color:var(--muted);margin-bottom:12px;line-height:1.5" data-i18n="corr_hint">
+    Korrelation der Tagesrenditen deiner Signal-Bot-Coins. Hohe positive Werte (rot) = die Coins bewegen sich gemeinsam &rarr; gleichzeitige Positionen erhoehen dein Risiko. Niedrige/negative Werte (gruen) = bessere Diversifikation.
+  </div>
+  <div id="corr-status" style="font-size:11px;color:var(--muted);padding:20px;text-align:center">Lade...</div>
+  <div id="corr-matrix" style="overflow-x:auto"></div>
+  <div style="display:flex;gap:14px;align-items:center;margin-top:14px;font-size:10px;color:var(--muted);flex-wrap:wrap">
+    <span data-i18n="corr_legend">Legende:</span>
+    <span><span style="display:inline-block;width:12px;height:12px;background:var(--red);border-radius:2px;vertical-align:middle"></span> &ge; 0.7 stark</span>
+    <span><span style="display:inline-block;width:12px;height:12px;background:var(--dca);border-radius:2px;vertical-align:middle"></span> 0.4&ndash;0.7 mittel</span>
+    <span><span style="display:inline-block;width:12px;height:12px;background:var(--dim);border-radius:2px;vertical-align:middle"></span> &plusmn;0.4 gering</span>
+    <span><span style="display:inline-block;width:12px;height:12px;background:var(--signal);border-radius:2px;vertical-align:middle"></span> &le; -0.4 negativ</span>
+  </div>
+</div>
+
 <!-- ALERTS -->
 <div id="panel-alerts" class="panel">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
@@ -2946,7 +3043,11 @@ const STRINGS = {
     nav_overview:'OVERVIEW', nav_signal:'SIGNAL', nav_grid:'GRID',
     nav_funding:'FUNDING', nav_dca:'DCA', nav_markt:'MARKT',
     nav_trades:'TRADES',
-    nav_backtest:'BACKTEST', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
+    nav_backtest:'BACKTEST', nav_correlation:'KORRELATION', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
+    // Korrelation
+    corr_title:'KORRELATIONS-MATRIX', corr_period:'Zeitraum', corr_refresh:'Aktualisieren',
+    corr_legend:'Legende:',
+    corr_hint:'Korrelation der Tagesrenditen deiner Signal-Bot-Coins. Hohe positive Werte (rot) = die Coins bewegen sich gemeinsam → gleichzeitige Positionen erhoehen dein Risiko. Niedrige/negative Werte (gruen) = bessere Diversifikation.',
     // Status
     running:'RUNNING', stopped:'STOPPED', starting:'STARTING',
     paused:'PAUSIERT', stopping:'STOPPING',
@@ -3015,7 +3116,10 @@ const STRINGS = {
     nav_overview:'OVERVIEW', nav_signal:'SIGNAL', nav_grid:'GRID',
     nav_funding:'FUNDING', nav_dca:'DCA', nav_markt:'MARKET',
     nav_trades:'TRADES',
-    nav_backtest:'BACKTEST', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
+    nav_backtest:'BACKTEST', nav_correlation:'CORRELATION', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
+    corr_title:'CORRELATION MATRIX', corr_period:'Period', corr_refresh:'Refresh',
+    corr_legend:'Legend:',
+    corr_hint:'Correlation of daily returns across your Signal Bot coins. High positive values (red) = coins move together → simultaneous positions increase your risk. Low/negative values (green) = better diversification.',
     running:'RUNNING', stopped:'STOPPED', starting:'STARTING',
     paused:'PAUSED', stopping:'STOPPING',
     start:'START', stop:'STOP', save:'SAVE SETTINGS',
@@ -3206,7 +3310,7 @@ function applyLang() {
     overview:'nav_overview', signal:'nav_signal', grid:'nav_grid',
     funding:'nav_funding', dca:'nav_dca', markt:'nav_markt',
     trades:'nav_trades',
-    backtest:'nav_backtest', alerts:'nav_alerts', settings:'nav_settings',
+    backtest:'nav_backtest', correlation:'nav_correlation', alerts:'nav_alerts', settings:'nav_settings',
   };
   document.querySelectorAll('.tab[data-tab]').forEach(btn => {
     const k = tabMap[btn.dataset.tab];
@@ -3813,6 +3917,63 @@ function renderTradeTiming(data) {
   labels.innerHTML = data.filter((_,i)=>i%4===0).map(h =>
     '<span style="flex:1;font-size:9px;color:var(--muted);text-align:center">'+h.hour+'h</span>'
   ).join('');
+}
+
+// -- KORRELATIONS-MATRIX --------------------------------------
+async function loadCorrelation() {
+  const status = document.getElementById('corr-status');
+  const matrix = document.getElementById('corr-matrix');
+  if (status) { status.style.display = 'block'; status.textContent = t('running') === 'RUNNING' ? 'Lade...' : 'Loading...'; }
+  if (matrix) matrix.innerHTML = '';
+  try {
+    const days = parseInt(document.getElementById('corr-period')?.value) || 30;
+    const r = await fetch('/api/correlation', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({period_days:days})});
+    const d = await r.json();
+    renderCorrelation(d);
+  } catch(e) {
+    if (status) { status.style.display='block'; status.textContent = 'Fehler: ' + e.message; }
+  }
+}
+
+function corrColor(v) {
+  // v in [-1,1]. Hohe positive Korrelation = Risiko (rot), negativ = gut (gruen).
+  if (v >= 0.7)  return 'rgba(248,113,113,.85)';   // --red
+  if (v >= 0.4)  return 'rgba(251,191,36,.75)';    // --dca amber
+  if (v <= -0.4) return 'rgba(0,214,143,.75)';     // --signal green
+  return 'rgba(80,80,90,.35)';                      // neutral
+}
+
+function renderCorrelation(d) {
+  const status = document.getElementById('corr-status');
+  const box    = document.getElementById('corr-matrix');
+  if (!box) return;
+  const syms = d.symbols || [];
+  const m    = d.matrix || [];
+  if (syms.length < 2) {
+    if (status) { status.style.display='block'; status.textContent = 'Nicht genug Daten (mind. 2 Coins mit Kursdaten noetig).'; }
+    box.innerHTML = ''; return;
+  }
+  if (status) status.style.display = 'none';
+  let html = '<table style="border-collapse:collapse;font-size:11px">';
+  html += '<tr><th style="padding:6px"></th>' +
+    syms.map(s => '<th style="padding:6px 8px;color:var(--muted);font-weight:600">'+esc(s)+'</th>').join('') + '</tr>';
+  for (let i=0; i<syms.length; i++) {
+    html += '<tr><th style="padding:6px 8px;color:var(--muted);font-weight:600;text-align:right">'+esc(syms[i])+'</th>';
+    for (let j=0; j<syms.length; j++) {
+      const v = (m[i]||[])[j];
+      const val = (typeof v === 'number') ? v : 0;
+      const bg  = i===j ? 'rgba(80,80,90,.55)' : corrColor(val);
+      const txt = i===j ? '—' : (val>=0?'+':'')+val.toFixed(2);
+      html += '<td style="padding:6px 8px;text-align:center;background:'+bg+';color:var(--white);border:1px solid var(--bg);min-width:44px">'+txt+'</td>';
+    }
+    html += '</tr>';
+  }
+  html += '</table>';
+  const note = (_lang==='en')
+    ? `Based on ${d.period_days}-day daily returns · ${d.count} coins`
+    : `Basiert auf ${d.period_days}-Tage-Tagesrenditen · ${d.count} Coins`;
+  html += '<div style="font-size:10px;color:var(--muted);margin-top:8px">'+note+'</div>';
+  box.innerHTML = html;
 }
 
 // -- CIRCUIT BREAKER BADGE ------------------------------------
@@ -4445,6 +4606,7 @@ function switchTab(id) {
   if (id === 'overview')  { loadPositions(); loadFGHistory(); }
   if (id === 'markt')     { loadMarket(); loadKalender(false); }
   if (id === 'alerts')    { loadAlerts(); loadAlertLog(); }
+  if (id === 'correlation') loadCorrelation();
   if (id === 'grid')      loadGridInstances();
   if (id === 'grid') {
     setTimeout(() => {
@@ -5056,6 +5218,10 @@ class Handler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/trade_timing":
             self._json(db_trade_timing())
+
+        elif self.path == "/api/correlation":
+            syms = data.get("symbols") if isinstance(data.get("symbols"), list) else None
+            self._json(compute_correlation(syms, data.get("period_days", 30)))
 
         elif self.path == "/api/circuit_status":
             self._json({"open": _circuit_open, "until": _circuit_until})

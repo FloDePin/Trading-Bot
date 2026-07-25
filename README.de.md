@@ -65,6 +65,7 @@ Betreibt bis zu 4 automatisierte Trading-Bots gleichzeitig, jeder auf seinem eig
 - Trade-Historie mit Winrate-Zusammenfassung
 - Backtesting: bis zu 730 Tage, Walk-Forward, Sharpe Ratio, gebührenbereinigt
 - Multi-Symbol-Backtest-Vergleich
+- Korrelations-Matrix als Heatmap — Korrelation der Tagesrenditen deiner Signal-Bot-Coins, damit du auf einen Blick siehst, ob deine Positionen wirklich diversifiziert sind oder sich alle gemeinsam bewegen (nutzt oeffentliche Marktdaten, funktioniert ohne API-Keys)
 - Trade-Timing-Analyse als Heatmap
 - Alerts via Telegram und/oder Discord
 - Zweisprachig: Deutsch / Englisch
