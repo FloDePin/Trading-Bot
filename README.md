@@ -68,6 +68,7 @@ Runs up to 4 automated trading bots simultaneously, each on its own Bitget sub-a
 - Multi-symbol backtest comparison
 - Correlation Matrix as a heatmap — correlation of the daily returns of your Signal Bot coins, so you can see at a glance whether your positions are truly diversified or all moving together
 - Trade Timing Analysis as a heatmap
+- Market regime & derivatives tab: BTC/ETH dominance, total market cap and trending coins (CoinGecko, free, no key) plus open interest, funding rate, long/short ratio and liquidations (Coinalyze, free API key required; degrades gracefully when no key is set)
 - Alerts via Telegram and/or Discord
 - Bilingual: German / English
 

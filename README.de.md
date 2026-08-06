@@ -68,6 +68,7 @@ Betreibt bis zu 4 automatisierte Trading‑Bots gleichzeitig, jeder auf seinem e
 - Multi‑Symbol‑Backtest‑Vergleich
 - Korrelations‑Matrix als Heatmap — Korrelation der Tagesrenditen deiner Signal‑Bot‑Coins, damit du auf einen Blick siehst, ob deine Positionen wirklich diversifiziert sind oder sich alle gemeinsam bewegen
 - Trade‑Timing‑Analyse als Heatmap
+- Markt‑Regime & Derivate‑Tab: BTC‑/ETH‑Dominanz, Gesamt‑Market‑Cap und Trending‑Coins (CoinGecko, kostenlos, ohne Key) sowie Open Interest, Funding Rate, Long/Short‑Verhältnis und Liquidationen (Coinalyze, kostenloser API‑Key nötig; fällt sauber aus, wenn kein Key gesetzt ist)
 - Alerts via Telegram und/oder Discord
 - Zweisprachig: Deutsch / Englisch
 

@@ -129,6 +129,7 @@ def db_trade_timing():
 DEFAULT_CONFIG = {
     "finnhub_key":     "",
     "cryptopanic_key": "",
+    "coinalyze_key":   "",
     "live_mode":        False,
     "telegram_token":  "",
     "telegram_chat_id":"",
@@ -742,6 +743,140 @@ def _correlation_conflict(cand_sym, direction, corr_data, open_positions, max_co
         return None
     except Exception:
         return None
+
+# ─────────────────────────────────────────────
+#  MARKT-REGIME (CoinGecko) + DERIVATE (Coinalyze)
+# ─────────────────────────────────────────────
+_regime_cache = {"data": None, "ts": 0}
+_deriv_cache  = {"data": None, "ts": 0}
+
+def fetch_coingecko_regime():
+    """Markt-Regime von CoinGecko (oeffentlich, kein Key): BTC-Dominanz, Gesamt-Market-Cap
+    (24h), und Trending-Coins. Fail-safe: bei Fehler letzter Cache/leer."""
+    if _regime_cache["data"] and time.time() - _regime_cache["ts"] < 120:
+        return _regime_cache["data"]
+    out = {"btc_dominance": None, "eth_dominance": None,
+           "total_mcap_usd": None, "mcap_change_24h": None, "trending": []}
+    try:
+        g = requests.get("https://api.coingecko.com/api/v3/global", timeout=10)
+        if g.status_code == 200:
+            d = g.json().get("data", {})
+            mcp = d.get("market_cap_percentage", {})
+            out["btc_dominance"]   = round(float(mcp.get("btc", 0)), 2)
+            out["eth_dominance"]   = round(float(mcp.get("eth", 0)), 2)
+            out["total_mcap_usd"]  = float(d.get("total_market_cap", {}).get("usd", 0))
+            out["mcap_change_24h"] = round(float(d.get("market_cap_change_percentage_24h_usd", 0)), 2)
+    except Exception as e:
+        log.debug(f"CG global: {e}")
+    try:
+        t = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=10)
+        if t.status_code == 200:
+            for c in t.json().get("coins", [])[:7]:
+                it = c.get("item", {})
+                out["trending"].append({
+                    "name":   it.get("name", ""),
+                    "symbol": (it.get("symbol", "") or "").upper(),
+                    "rank":   it.get("market_cap_rank"),
+                })
+    except Exception as e:
+        log.debug(f"CG trending: {e}")
+    _regime_cache.update({"data": out, "ts": time.time()})
+    return out
+
+def fetch_derivatives(bases=None):
+    """Aggregierte Derivate-Daten (Open Interest, Funding, Long/Short, Liquidationen) von
+    Coinalyze. Braucht einen kostenlosen API-Key (Settings). Nutzt Binance-Perps (`.A`),
+    da dort alle Majors verfuegbar sind. Fail-safe: kein Key/Fehler -> {error, rows:[]}."""
+    cfg = load_config()
+    key = str(cfg.get("coinalyze_key", "")).strip()
+    if not key:
+        return {"error": "no_key", "rows": []}
+    if _deriv_cache["data"] and time.time() - _deriv_cache["ts"] < 120:
+        return _deriv_cache["data"]
+
+    if not bases:
+        toks  = cfg.get("bots", {}).get("signal", {}).get("tokens", [])
+        bases = ["BTC", "ETH"] + [str(t).replace("USDT", "") for t in toks]
+    seen  = set()
+    bases = [b for b in bases if b and not (b in seen or seen.add(b))][:12]
+
+    syms = [f"{b}USDT_PERP.A" for b in bases]
+    csv  = ",".join(syms)
+    hdr  = {"api_key": key}
+
+    def _get(path, params):
+        try:
+            r = requests.get(f"https://api.coinalyze.net/v1/{path}",
+                             params=params, headers=hdr, timeout=12)
+            if r.status_code == 200:
+                return r.json()
+            if r.status_code in (401, 403):
+                return {"__auth__": True}
+            return []
+        except Exception:
+            return []
+
+    oi_raw = _get("open-interest", {"symbols": csv, "convert_to_usd": "true"})
+    if isinstance(oi_raw, dict) and oi_raw.get("__auth__"):
+        return {"error": "bad_key", "rows": []}
+    fr_raw = _get("funding-rate", {"symbols": csv})
+
+    now, frm = int(time.time()), int(time.time()) - 3 * 86400
+    ls_raw  = _get("long-short-ratio-history", {"symbols": csv, "interval": "daily", "from": frm, "to": now})
+    liq_raw = _get("liquidation-history", {"symbols": csv, "interval": "daily", "from": frm, "to": now, "convert_to_usd": "true"})
+
+    def _val_map(arr):
+        m = {}
+        if isinstance(arr, list):
+            for d in arr:
+                if isinstance(d, dict) and d.get("symbol") is not None:
+                    m[d["symbol"]] = d.get("value")
+        return m
+
+    def _last_hist(arr):
+        m = {}
+        if isinstance(arr, list):
+            for d in arr:
+                if isinstance(d, dict) and d.get("history"):
+                    m[d.get("symbol")] = d["history"][-1]
+        return m
+
+    oi, fr = _val_map(oi_raw), _val_map(fr_raw)
+    ls, liq = _last_hist(ls_raw), _last_hist(liq_raw)
+
+    def _num(d, *keys):
+        for k in keys:
+            v = d.get(k)
+            if isinstance(v, (int, float)):
+                return v
+        return None
+
+    rows = []
+    for b in bases:
+        s   = f"{b}USDT_PERP.A"
+        lsp = ls.get(s, {}) if isinstance(ls.get(s), dict) else {}
+        lqp = liq.get(s, {}) if isinstance(liq.get(s), dict) else {}
+        # Long/Short: Ratio bevorzugt (r), sonst aus long%/short% ableiten
+        ratio = _num(lsp, "r", "ratio")
+        long_pct = _num(lsp, "l", "long", "longs")
+        short_pct = _num(lsp, "s", "short", "shorts")
+        if ratio is None and long_pct is not None and short_pct not in (None, 0):
+            try: ratio = round(long_pct / short_pct, 2)
+            except Exception: ratio = None
+        rows.append({
+            "coin":      b,
+            "oi_usd":    oi.get(s),
+            "funding":   fr.get(s),
+            "ratio":     ratio,
+            "long_pct":  long_pct,
+            "short_pct": short_pct,
+            "liq_long":  _num(lqp, "l", "long", "longs"),
+            "liq_short": _num(lqp, "s", "short", "shorts"),
+        })
+
+    result = {"rows": rows}
+    _deriv_cache.update({"data": result, "ts": time.time()})
+    return result
 
 # ─────────────────────────────────────────────
 #  TRADE-HISTORIE (alle Sub-Accounts)
@@ -2324,6 +2459,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <button class="tab" data-tab="trades" onclick="switchTab('trades')">TRADES</button>
   <button class="tab" data-tab="backtest" onclick="switchTab('backtest')">BACKTEST</button>
   <button class="tab" data-tab="correlation" onclick="switchTab('correlation')">KORRELATION</button>
+  <button class="tab" data-tab="derivate" onclick="switchTab('derivate')">DERIVATE</button>
   <button class="tab" data-tab="alerts" onclick="switchTab('alerts')">ALERTS</button>
   <button class="tab" data-tab="settings" onclick="switchTab('settings')">SETTINGS</button>
   <button id="lang-btn" onclick="toggleLang()" style="margin-left:auto;background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer;white-space:nowrap">DE / EN</button>
@@ -2782,6 +2918,48 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   </div>
 </div>
 
+<!-- DERIVATE + MARKT-REGIME -->
+<div id="panel-derivate" class="panel">
+
+  <!-- Markt-Regime (CoinGecko) -->
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="reg_title">MARKT-REGIME (COINGECKO)</span>
+    <button class="btn" onclick="loadDerivate()" style="--accent:var(--signal);padding:5px 12px" data-i18n="reg_refresh">Aktualisieren</button>
+  </div>
+  <div class="grid g4" style="margin-bottom:10px">
+    <div class="card"><div class="card-label" data-i18n="reg_btc_dom">BTC-Dominanz</div>
+      <div class="card-value white" id="reg-btc">–</div><div class="card-sub">%</div></div>
+    <div class="card"><div class="card-label" data-i18n="reg_eth_dom">ETH-Dominanz</div>
+      <div class="card-value white" id="reg-eth">–</div><div class="card-sub">%</div></div>
+    <div class="card"><div class="card-label" data-i18n="reg_mcap">Market Cap 24h</div>
+      <div class="card-value" id="reg-mcap">–</div><div class="card-sub">%</div></div>
+    <div class="card"><div class="card-label" data-i18n="reg_trending">Trending</div>
+      <div id="reg-trending" style="font-size:11px;color:var(--text);line-height:1.6;margin-top:2px">–</div></div>
+  </div>
+  <div style="font-size:10px;color:var(--muted);margin-bottom:20px;line-height:1.5" data-i18n="reg_hint">
+    Hohe/steigende BTC-Dominanz = Kapital fliesst in BTC, Alts schwaecheln oft. Nutze das als groben Regime-Filter.
+  </div>
+
+  <!-- Derivate (Coinalyze) -->
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="deriv_title">DERIVATE-DATEN (COINALYZE)</span>
+  </div>
+  <div style="font-size:10px;color:var(--muted);margin-bottom:12px;line-height:1.5" data-i18n="deriv_hint">
+    Aggregierte Futures-Daten (Binance-Perps): Open Interest (offenes Kontraktvolumen), Funding Rate, Long/Short-Verhaeltnis und Liquidationen der letzten 24h. Braucht einen kostenlosen Coinalyze-API-Key (Settings → Globale API-Keys).
+  </div>
+  <div id="deriv-status" style="font-size:11px;color:var(--muted);padding:16px;text-align:center"></div>
+  <div class="rate-table" id="deriv-table-wrap" style="display:none">
+    <div class="ov-head" style="grid-template-columns:70px 1fr 90px 90px 110px">
+      <span data-i18n="deriv_coin">Coin</span>
+      <span data-i18n="deriv_oi">Open Interest</span>
+      <span data-i18n="deriv_funding">Funding</span>
+      <span data-i18n="deriv_ls">Long/Short</span>
+      <span data-i18n="deriv_liq">Liq. 24h (L/S)</span>
+    </div>
+    <div id="deriv-rows"></div>
+  </div>
+</div>
+
 <!-- ALERTS -->
 <div id="panel-alerts" class="panel">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
@@ -2909,6 +3087,8 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         </div>
         <div class="field-row"><label>Finnhub API Key</label>
           <input type="text" id="cfg-finnhub" placeholder="Fuer Makro-Kalender (kostenlos)"></div>
+        <div class="field-row"><label>Coinalyze API Key</label>
+          <input type="text" id="cfg-coinalyze" placeholder="Fuer Derivate-Tab (kostenlos, coinalyze.net)"></div>
         <div class="field-row"><label>Telegram Bot Token</label>
           <input type="text" id="cfg-tg-token" placeholder="123456:ABC-DEF... von @BotFather"></div>
         <div class="field-row"><label>Telegram Chat ID</label>
@@ -3099,11 +3279,18 @@ const STRINGS = {
     nav_overview:'OVERVIEW', nav_signal:'SIGNAL', nav_grid:'GRID',
     nav_funding:'FUNDING', nav_dca:'DCA', nav_markt:'MARKT',
     nav_trades:'TRADES',
-    nav_backtest:'BACKTEST', nav_correlation:'KORRELATION', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
+    nav_backtest:'BACKTEST', nav_correlation:'KORRELATION', nav_derivate:'DERIVATE', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
     // Korrelation
     corr_title:'KORRELATIONS-MATRIX', corr_period:'Zeitraum', corr_refresh:'Aktualisieren',
     corr_legend:'Legende:',
     corr_hint:'Korrelation der Tagesrenditen deiner Signal-Bot-Coins. Hohe positive Werte (rot) = die Coins bewegen sich gemeinsam → gleichzeitige Positionen erhoehen dein Risiko. Niedrige/negative Werte (gruen) = bessere Diversifikation.',
+    // Derivate + Markt-Regime
+    reg_title:'MARKT-REGIME (COINGECKO)', reg_refresh:'Aktualisieren',
+    reg_btc_dom:'BTC-Dominanz', reg_eth_dom:'ETH-Dominanz', reg_mcap:'Market Cap 24h', reg_trending:'Trending',
+    reg_hint:'Hohe/steigende BTC-Dominanz = Kapital fliesst in BTC, Alts schwaecheln oft. Nutze das als groben Regime-Filter.',
+    deriv_title:'DERIVATE-DATEN (COINALYZE)',
+    deriv_hint:'Aggregierte Futures-Daten (Binance-Perps): Open Interest, Funding Rate, Long/Short-Verhaeltnis und Liquidationen der letzten 24h. Braucht einen kostenlosen Coinalyze-API-Key (Settings → Globale API-Keys).',
+    deriv_coin:'Coin', deriv_oi:'Open Interest', deriv_funding:'Funding', deriv_ls:'Long/Short', deriv_liq:'Liq. 24h (L/S)',
     // Status
     running:'RUNNING', stopped:'STOPPED', starting:'STARTING',
     paused:'PAUSIERT', stopping:'STOPPING',
@@ -3172,10 +3359,16 @@ const STRINGS = {
     nav_overview:'OVERVIEW', nav_signal:'SIGNAL', nav_grid:'GRID',
     nav_funding:'FUNDING', nav_dca:'DCA', nav_markt:'MARKET',
     nav_trades:'TRADES',
-    nav_backtest:'BACKTEST', nav_correlation:'CORRELATION', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
+    nav_backtest:'BACKTEST', nav_correlation:'CORRELATION', nav_derivate:'DERIVATIVES', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
     corr_title:'CORRELATION MATRIX', corr_period:'Period', corr_refresh:'Refresh',
     corr_legend:'Legend:',
     corr_hint:'Correlation of daily returns across your Signal Bot coins. High positive values (red) = coins move together → simultaneous positions increase your risk. Low/negative values (green) = better diversification.',
+    reg_title:'MARKET REGIME (COINGECKO)', reg_refresh:'Refresh',
+    reg_btc_dom:'BTC dominance', reg_eth_dom:'ETH dominance', reg_mcap:'Market cap 24h', reg_trending:'Trending',
+    reg_hint:'High/rising BTC dominance = capital flowing into BTC, alts often weaken. Use it as a rough regime filter.',
+    deriv_title:'DERIVATIVES DATA (COINALYZE)',
+    deriv_hint:'Aggregated futures data (Binance perps): open interest, funding rate, long/short ratio and liquidations over the last 24h. Requires a free Coinalyze API key (Settings → Global API keys).',
+    deriv_coin:'Coin', deriv_oi:'Open Interest', deriv_funding:'Funding', deriv_ls:'Long/Short', deriv_liq:'Liq. 24h (L/S)',
     running:'RUNNING', stopped:'STOPPED', starting:'STARTING',
     paused:'PAUSED', stopping:'STOPPING',
     start:'START', stop:'STOP', save:'SAVE SETTINGS',
@@ -3366,7 +3559,7 @@ function applyLang() {
     overview:'nav_overview', signal:'nav_signal', grid:'nav_grid',
     funding:'nav_funding', dca:'nav_dca', markt:'nav_markt',
     trades:'nav_trades',
-    backtest:'nav_backtest', correlation:'nav_correlation', alerts:'nav_alerts', settings:'nav_settings',
+    backtest:'nav_backtest', correlation:'nav_correlation', derivate:'nav_derivate', alerts:'nav_alerts', settings:'nav_settings',
   };
   document.querySelectorAll('.tab[data-tab]').forEach(btn => {
     const k = tabMap[btn.dataset.tab];
@@ -4032,6 +4225,87 @@ function renderCorrelation(d) {
   box.innerHTML = html;
 }
 
+// -- DERIVATE + MARKT-REGIME ----------------------------------
+async function loadDerivate() {
+  loadRegime();
+  loadDerivatives();
+}
+
+async function loadRegime() {
+  try {
+    const r = await fetch('/api/regime');
+    const d = await r.json();
+    const fmtPct = v => (v==null?'–':(v>=0?'+':'')+Number(v).toFixed(2));
+    document.getElementById('reg-btc').textContent  = d.btc_dominance==null?'–':Number(d.btc_dominance).toFixed(2);
+    document.getElementById('reg-eth').textContent  = d.eth_dominance==null?'–':Number(d.eth_dominance).toFixed(2);
+    const mc = document.getElementById('reg-mcap');
+    mc.textContent = fmtPct(d.mcap_change_24h);
+    mc.className = 'card-value ' + (Number(d.mcap_change_24h)>=0?'green':'red');
+    const tr = document.getElementById('reg-trending');
+    tr.innerHTML = (d.trending&&d.trending.length)
+      ? d.trending.slice(0,5).map(c=>esc(c.symbol)).join(' · ')
+      : '–';
+  } catch(e) {}
+}
+
+function fmtUsdShort(v) {
+  if (v==null || isNaN(v)) return '–';
+  const a = Math.abs(v);
+  if (a >= 1e9) return (v/1e9).toFixed(2)+'B';
+  if (a >= 1e6) return (v/1e6).toFixed(1)+'M';
+  if (a >= 1e3) return (v/1e3).toFixed(1)+'K';
+  return Number(v).toFixed(0);
+}
+
+async function loadDerivatives() {
+  const status = document.getElementById('deriv-status');
+  const wrap   = document.getElementById('deriv-table-wrap');
+  status.style.display = 'block'; wrap.style.display = 'none';
+  status.textContent = (_lang==='en'?'Loading…':'Lade…');
+  try {
+    const r = await fetch('/api/derivatives');
+    const d = await r.json();
+    if (d.error === 'no_key') {
+      status.innerHTML = (_lang==='en')
+        ? 'No Coinalyze API key set. Add a free key under <b>Settings → Global API keys</b>.'
+        : 'Kein Coinalyze-API-Key gesetzt. Trage einen kostenlosen Key unter <b>Settings → Globale API-Keys</b> ein.';
+      return;
+    }
+    if (d.error === 'bad_key') {
+      status.textContent = (_lang==='en')
+        ? 'Coinalyze API key invalid — please check it in Settings.'
+        : 'Coinalyze-API-Key ungueltig — bitte in den Settings pruefen.';
+      return;
+    }
+    const rows = d.rows || [];
+    if (!rows.length) { status.textContent = (_lang==='en'?'No data.':'Keine Daten.'); return; }
+    document.getElementById('deriv-rows').innerHTML = rows.map(x => {
+      const fr = x.funding==null ? '–' : (x.funding>=0?'+':'')+(x.funding*100).toFixed(4)+'%';
+      const frCol = x.funding==null?'#888':(x.funding>0?'var(--red)':x.funding<0?'var(--signal)':'#888');
+      let ls = '–', lsCol = '#888';
+      if (x.ratio!=null) {
+        ls = Number(x.ratio).toFixed(2);
+        lsCol = x.ratio>1.1?'var(--signal)':x.ratio<0.9?'var(--red)':'#888';
+      } else if (x.long_pct!=null && x.short_pct!=null) {
+        ls = Math.round(x.long_pct)+'/'+Math.round(x.short_pct);
+      }
+      const liq = (x.liq_long!=null||x.liq_short!=null)
+        ? fmtUsdShort(x.liq_long)+' / '+fmtUsdShort(x.liq_short) : '–';
+      return '<div class="ov-row" style="grid-template-columns:70px 1fr 90px 90px 110px">' +
+        '<span style="font-weight:600;color:var(--white)">'+esc(x.coin)+'</span>' +
+        '<span class="blue">'+fmtUsdShort(x.oi_usd)+'</span>' +
+        '<span style="color:'+frCol+'">'+fr+'</span>' +
+        '<span style="color:'+lsCol+'">'+ls+'</span>' +
+        '<span style="font-size:10px;color:var(--muted)">'+liq+'</span>' +
+      '</div>';
+    }).join('');
+    status.style.display = 'none';
+    wrap.style.display = 'block';
+  } catch(e) {
+    status.textContent = 'Fehler: ' + e.message;
+  }
+}
+
 // -- CIRCUIT BREAKER BADGE ------------------------------------
 async function checkCircuitBreaker() {
   try {
@@ -4663,6 +4937,7 @@ function switchTab(id) {
   if (id === 'markt')     { loadMarket(); loadKalender(false); }
   if (id === 'alerts')    { loadAlerts(); loadAlertLog(); }
   if (id === 'correlation') loadCorrelation();
+  if (id === 'derivate')  loadDerivate();
   if (id === 'grid')      loadGridInstances();
   if (id === 'grid') {
     setTimeout(() => {
@@ -4979,6 +5254,7 @@ function fillSettingsForm(state) {
     document.getElementById('cfg-dash-user').value   = s(cfg.dashboard_user||'admin');
     document.getElementById('cfg-dash-pass').value   = '';
     document.getElementById('cfg-finnhub').value     = s(cfg.finnhub_key);
+    document.getElementById('cfg-coinalyze').value   = s(cfg.coinalyze_key);
     document.getElementById('cfg-cryptopanic').value = s(cfg.cryptopanic_key);
     document.getElementById('cfg-tg-token').value    = s(cfg.telegram_token);
     document.getElementById('cfg-tg-chat').value     = s(cfg.telegram_chat_id);
@@ -5022,6 +5298,7 @@ async function saveSettings() {
     dashboard_user:     val('cfg-dash-user'),
     dashboard_password: val('cfg-dash-pass'),
     finnhub_key:     val('cfg-finnhub'),
+    coinalyze_key:   val('cfg-coinalyze'),
     cryptopanic_key: val('cfg-cryptopanic'),
     telegram_token:  val('cfg-tg-token'),
     telegram_chat_id:val('cfg-tg-chat'),
@@ -5172,6 +5449,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(fetch_all_positions())
         elif self.path == "/api/fg_history":
             self._json(fetch_fg_history())
+        elif self.path == "/api/regime":
+            self._json(fetch_coingecko_regime())
+        elif self.path == "/api/derivatives":
+            self._json(fetch_derivatives())
         elif self.path == "/api/alert_log":
             with _alert_lock:
                 self._json(list(_alert_log))
@@ -5211,7 +5492,7 @@ class Handler(BaseHTTPRequestHandler):
     def _dispatch_post(self, data):
         if self.path == "/api/config":
             cfg = load_config()
-            for k in ("finnhub_key","cryptopanic_key","telegram_token","telegram_chat_id"):
+            for k in ("finnhub_key","cryptopanic_key","coinalyze_key","telegram_token","telegram_chat_id"):
                 if k in data: cfg[k] = data[k]
             # Dashboard-Login nur ueberschreiben wenn tatsaechlich ein Wert gesendet wurde -
             # ein leerer String wuerde sonst das Passwort effektiv aussperren.
