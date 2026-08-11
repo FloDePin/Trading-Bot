@@ -2482,6 +2482,9 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
 .ll.TRADE{color:var(--signal)}.ll.MACRO{color:var(--funding)}
 
 /* SETTINGS */
+.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start;max-width:1500px}
+.settings-col{min-width:0}
+@media(max-width:900px){.settings-grid{grid-template-columns:1fr}}
 .settings-section{background:var(--bg2);border:1px solid var(--border);
                    border-radius:8px;margin-bottom:10px;overflow:hidden}
 .settings-head{padding:12px 16px;cursor:pointer;
@@ -2596,22 +2599,22 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
     </div>
   </div>
   <div class="grid g4">
-    <div class="card"><div class="card-label">Gesamt Balance</div>
+    <div class="card"><div class="card-label" data-i18n="total_balance">Gesamt Balance</div>
       <div class="card-value blue" id="ov-balance">0.00</div><div class="card-sub">USDT (Demo)</div></div>
-    <div class="card"><div class="card-label" title="Ohne Funding Bot - der handelt nicht real">Gesamt PnL (ohne Funding)</div>
+    <div class="card"><div class="card-label" data-i18n="total_pnl_nofund">Gesamt PnL (ohne Funding)</div>
       <div class="card-value" id="ov-pnl">+0.00</div><div class="card-sub" id="ov-pnlpct">0.00%</div></div>
-    <div class="card"><div class="card-label">Aktive Bots</div>
-      <div class="card-value white" id="ov-active">0 / 4</div><div class="card-sub">Laufen / Gesamt</div></div>
-    <div class="card"><div class="card-label">Trades gesamt</div>
-      <div class="card-value white" id="ov-trades">0</div><div class="card-sub">Alle Bots</div></div>
+    <div class="card"><div class="card-label" data-i18n="active_bots">Aktive Bots</div>
+      <div class="card-value white" id="ov-active">0 / 4</div><div class="card-sub" data-i18n="running_total">Laufen / Gesamt</div></div>
+    <div class="card"><div class="card-label" data-i18n="total_trades">Trades gesamt</div>
+      <div class="card-value white" id="ov-trades">0</div><div class="card-sub" data-i18n="all_bots">Alle Bots</div></div>
   </div>
   <div class="ov-table">
-    <div class="ov-head"><span>Bot</span><span>Status</span><span>Balance</span><span>PnL</span><span>Trades</span><span>Aktion</span></div>
+    <div class="ov-head"><span>Bot</span><span>Status</span><span>Balance</span><span>PnL</span><span>Trades</span><span data-i18n="th_action">Aktion</span></div>
     <div id="ov-rows"></div>
   </div>
   <div class="macro-bar" id="fg-history-wrap" style="margin-bottom:14px">
     <div class="macro-title" style="display:flex;justify-content:space-between">
-      <span>Fear &amp; Greed Index – 30 Tage</span>
+      <span data-i18n="fg_chart">Fear &amp; Greed Index – 30 Tage</span>
       <span id="fg-current" style="font-weight:700"></span>
     </div>
     <svg id="fg-chart" viewBox="0 0 760 52" preserveAspectRatio="none"
@@ -2619,20 +2622,20 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
     <div id="fg-labels" style="display:flex;justify-content:space-between;font-size:9px;color:var(--muted);margin-top:2px"></div>
   </div>
   <div class="macro-bar">
-    <div class="macro-title">Makro-Ereignisse (48h)</div>
-    <div class="macro-events" id="ov-macro"><span style="color:var(--dim)">Kein Finnhub Key gesetzt</span></div>
+    <div class="macro-title" data-i18n="macro_events">Makro-Ereignisse (48h)</div>
+    <div class="macro-events" id="ov-macro"><span style="color:var(--dim)" data-i18n="no_finnhub">Kein Finnhub Key gesetzt</span></div>
   </div>
   <div id="ov-positions-wrap" style="display:none;margin-bottom:14px">
-    <div class="macro-title" style="margin-bottom:8px">Offene Positionen (alle Bots)</div>
+    <div class="macro-title" style="margin-bottom:8px" data-i18n="positions">Offene Positionen (alle Bots)</div>
     <div class="ov-table" style="margin-bottom:0">
       <div class="ov-head" style="grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr 1fr">
-        <span>Bot</span><span>Symbol</span><span>Seite</span><span>Groesse</span><span>Einstieg</span><span>uPnL</span><span>Hebel</span>
+        <span>Bot</span><span>Symbol</span><span data-i18n="pos_side">Seite</span><span data-i18n="pos_size">Groesse</span><span data-i18n="pos_entry">Einstieg</span><span>uPnL</span><span data-i18n="pos_lev">Hebel</span>
       </div>
       <div id="ov-positions"></div>
     </div>
   </div>
   <div class="log-wrap">
-    <div class="log-head"><span>Letzte Aktivitaet</span><span id="ov-logcount">0 Eintraege</span></div>
+    <div class="log-head"><span data-i18n="last_activity">Letzte Aktivitaet</span><span id="ov-logcount">0</span></div>
     <div class="log-body" id="ov-log"></div>
   </div>
 </div>
@@ -2648,9 +2651,9 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   </div>
   <div class="ov-table">
     <div id="markt-head" class="ov-head" style="grid-template-columns:80px 1fr 80px 80px 80px 80px 120px">
-      <span>Symbol</span><span>Preis</span><span>24h %</span><span>24h Hoch</span><span>24h Tief</span><span>Funding</span><span>Volumen (Mio $)</span>
+      <span>Symbol</span><span data-i18n="th_price">Preis</span><span>24h %</span><span data-i18n="th_high24">24h Hoch</span><span data-i18n="th_low24">24h Tief</span><span>Funding</span><span data-i18n="th_vol_m">Volumen (Mio $)</span>
     </div>
-    <div id="markt-rows"><div style="padding:20px;color:var(--muted);font-size:11px">Lade Marktdaten...</div></div>
+    <div id="markt-rows"><div style="padding:20px;color:var(--muted);font-size:11px" data-i18n="loading_market">Lade Marktdaten...</div></div>
   </div>
 </div>
 
@@ -2666,15 +2669,15 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <option value="funding">Funding Bot</option>
         <option value="dca">DCA Bot</option>
       </select>
-      <button onclick="loadTrades()" style="background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer">Laden</button>
+      <button onclick="loadTrades()" style="background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer" data-i18n="load">Laden</button>
     </div>
   </div>
   <div id="trades-summary" style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap"></div>
   <div class="ov-table" style="margin-bottom:14px">
     <div class="ov-head" style="grid-template-columns:90px 70px 60px 60px 80px 60px 80px 70px">
-      <span>Zeit</span><span>Bot</span><span>Symbol</span><span>Seite</span><span>Preis</span><span>Menge</span><span>PnL</span><span>Gebuehr</span>
+      <span data-i18n="th_time">Zeit</span><span>Bot</span><span>Symbol</span><span data-i18n="pos_side">Seite</span><span data-i18n="th_price">Preis</span><span data-i18n="th_qty">Menge</span><span>PnL</span><span data-i18n="th_fee">Gebuehr</span>
     </div>
-    <div id="trades-rows"><div style="padding:20px;color:var(--muted);font-size:11px">Auf "Laden" klicken.</div></div>
+    <div id="trades-rows"><div style="padding:20px;color:var(--muted);font-size:11px" data-i18n="click_load">Auf "Laden" klicken.</div></div>
   </div>
   <div style="margin-top:14px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -2692,7 +2695,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <div class="bot-header">
     <div>
       <div class="bot-title" style="color:var(--signal)">SIGNAL BOT</div>
-      <div class="bot-meta">RSI · EMA · MACD · Funding · Makro | 3x Hebel</div>
+      <div class="bot-meta" data-i18n="meta_signal">RSI · EMA · MACD · Funding · Makro | 3x Hebel</div>
     </div>
     <div style="display:flex;gap:10px;align-items:center">
       <button class="btn-help" onclick="showHelp('signal')" title="Erklaerung">?</button>
@@ -2703,28 +2706,28 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <div class="grid g4" style="margin-bottom:14px">
     <div class="card"><div class="card-label">PnL</div>
       <div class="card-value" id="s-pnl">+0.00</div><div class="card-sub" id="s-pnlpct">0.00%</div></div>
-    <div class="card"><div class="card-label">Trades</div>
-      <div class="card-value white" id="s-trades">0</div><div class="card-sub">Ausgefuehrt</div></div>
-    <div class="card"><div class="card-label">Makro</div>
-      <div class="card-value" id="s-blackout">OK</div><div class="card-sub">Kein Blackout</div></div>
+    <div class="card"><div class="card-label" data-i18n="trades">Trades</div>
+      <div class="card-value white" id="s-trades">0</div><div class="card-sub" data-i18n="executed">Ausgefuehrt</div></div>
+    <div class="card"><div class="card-label" data-i18n="macro">Makro</div>
+      <div class="card-value" id="s-blackout">OK</div><div class="card-sub" data-i18n="no_blackout">Kein Blackout</div></div>
     <div class="card"><div class="card-label">Win/Loss Streak</div>
       <div style="display:flex;gap:6px;align-items:baseline;margin-top:4px">
         <span id="s-win-streak" style="font-size:18px;font-weight:700;color:var(--signal)">0W</span>
         <span id="s-loss-streak" style="font-size:18px;font-weight:700;color:var(--red)">0L</span>
       </div>
-      <div class="card-sub" id="s-streak-info">aktuell</div>
+      <div class="card-sub" id="s-streak-info" data-i18n="cur_streak">aktuell</div>
     </div>
   </div>
   <div class="pnl-card">
     <div class="pnl-card-label">
-      <span>PnL-Verlauf</span>
+      <span data-i18n="pnl_history">PnL-Verlauf</span>
       <span id="s-trend" class="trend-flat">- -</span>
     </div>
     <svg class="spark" id="s-spark" viewBox="0 0 400 40" preserveAspectRatio="none"></svg>
   </div>
   <div class="token-grid" id="s-tokens"></div>
   <div class="macro-bar">
-    <div class="macro-title">Makro-Ereignisse</div>
+    <div class="macro-title" data-i18n="macro_events">Makro-Ereignisse</div>
     <div class="macro-events" id="s-macro"></div>
   </div>
   <div class="log-wrap">
@@ -2738,7 +2741,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <div class="bot-header">
     <div>
       <div class="bot-title" style="color:var(--grid)">GRID BOT</div>
-      <div class="bot-meta">Automatische Kauf/Verkauf-Level im Preis-Raster</div>
+      <div class="bot-meta" data-i18n="meta_grid">Automatische Kauf/Verkauf-Level im Preis-Raster</div>
     </div>
     <div style="display:flex;gap:10px;align-items:center">
       <button class="btn-help" onclick="showHelp('grid')" title="Erklaerung">?</button>
@@ -2747,11 +2750,11 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
     </div>
   </div>
   <div class="grid g4" style="margin-bottom:14px">
-    <div class="card"><div class="card-label">Balance</div>
+    <div class="card"><div class="card-label" data-i18n="balance">Balance</div>
       <div class="card-value blue" id="g-balance">0.00</div><div class="card-sub">USDT</div></div>
     <div class="card"><div class="card-label">PnL</div>
-      <div class="card-value" id="g-pnl">+0.00</div><div class="card-sub">Grid-Gewinne</div></div>
-    <div class="card"><div class="card-label">Gefuellte Level</div>
+      <div class="card-value" id="g-pnl">+0.00</div><div class="card-sub" data-i18n="grid_profits">Grid-Gewinne</div></div>
+    <div class="card"><div class="card-label" data-i18n="filled_levels">Gefuellte Level</div>
       <div class="card-value white" id="g-filled">0</div><div class="card-sub" id="g-range">–</div></div>
     <div class="card"><div class="card-label">Symbol</div>
       <div class="card-value white" id="g-symbol">–</div><div class="card-sub">Futures</div></div>
@@ -2762,7 +2765,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   </div>
   <div id="tv-chart" style="height:260px"></div>
   <div class="pnl-card">
-    <div class="pnl-card-label"><span>PnL-Verlauf</span><span id="g-trend" class="trend-flat">- -</span></div>
+    <div class="pnl-card-label"><span data-i18n="pnl_history">PnL-Verlauf</span><span id="g-trend" class="trend-flat">- -</span></div>
     <svg class="spark" id="g-spark" viewBox="0 0 400 40" preserveAspectRatio="none"></svg>
   </div>
   <div class="log-wrap">
@@ -2812,17 +2815,17 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
 <div id="panel-markt" class="panel">
   <!-- Abschnitt 1: Markt-Uebersicht -->
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)">MARKT-UEBERSICHT</span>
+    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="markt_title">MARKT-UEBERSICHT</span>
     <div style="display:flex;gap:8px;align-items:center">
       <span id="markt-update" style="font-size:10px;color:var(--muted)">--</span>
-      <button onclick="loadMarket()" style="background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer">Aktualisieren</button>
+      <button onclick="loadMarket()" style="background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer" data-i18n="refresh">Aktualisieren</button>
     </div>
   </div>
   <div class="ov-table" style="margin-bottom:28px">
     <div id="markt-head" class="ov-head" style="grid-template-columns:80px 1fr 80px 80px 80px 80px 120px">
-      <span>Symbol</span><span>Preis</span><span>24h %</span><span>24h Hoch</span><span>24h Tief</span><span>Funding</span><span>Volumen (Mio $)</span>
+      <span>Symbol</span><span data-i18n="th_price">Preis</span><span>24h %</span><span data-i18n="th_high24">24h Hoch</span><span data-i18n="th_low24">24h Tief</span><span>Funding</span><span data-i18n="th_vol_m">Volumen (Mio $)</span>
     </div>
-    <div id="markt-rows"><div style="padding:20px;color:var(--muted);font-size:11px">Lade Marktdaten...</div></div>
+    <div id="markt-rows"><div style="padding:20px;color:var(--muted);font-size:11px" data-i18n="loading_market">Lade Marktdaten...</div></div>
   </div>
 
   <!-- Divider -->
@@ -2830,22 +2833,22 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
 
   <!-- Abschnitt 2: Wirtschaftskalender -->
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)">WIRTSCHAFTSKALENDER</span>
+    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="econ_cal">WIRTSCHAFTSKALENDER</span>
     <div style="display:flex;gap:6px;align-items:center">
-      <button onclick="filterKal('all')" id="kf-all" class="preset-btn med" style="padding:4px 10px">ALLE</button>
+      <button onclick="filterKal('all')" id="kf-all" class="preset-btn med" style="padding:4px 10px" data-i18n="filter_all">ALLE</button>
       <button onclick="filterKal('US')"  id="kf-us"  class="preset-btn degen" style="padding:4px 10px">USA</button>
       <button onclick="filterKal('EU')"  id="kf-eu"  class="preset-btn med" style="padding:4px 10px">EU</button>
-      <button onclick="loadKalender(true)" style="background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer">Neu laden</button>
+      <button onclick="loadKalender(true)" style="background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer" data-i18n="reload">Neu laden</button>
     </div>
   </div>
-  <div id="kal-blackout-info" style="display:none;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.2);border-radius:6px;padding:10px 14px;margin-bottom:12px;font-size:11px;color:var(--red)">
+  <div id="kal-blackout-info" style="display:none;background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.2);border-radius:6px;padding:10px 14px;margin-bottom:12px;font-size:11px;color:var(--red)" data-i18n="us_blackout">
     US BLACKOUT AKTIV - Signal Bot oeffnet keine neuen Positionen
   </div>
   <div class="ov-table">
     <div class="ov-head" style="grid-template-columns:70px 50px 1fr 80px 80px 80px">
-      <span>Zeit (UTC)</span><span>Land</span><span>Ereignis</span><span>Impact</span><span>Aktuell</span><span>Prognose</span>
+      <span data-i18n="kal_time">Zeit (UTC)</span><span data-i18n="kal_country">Land</span><span data-i18n="kal_event">Ereignis</span><span>Impact</span><span data-i18n="kal_actual">Aktuell</span><span data-i18n="kal_forecast">Prognose</span>
     </div>
-    <div id="kal-rows"><div style="padding:20px;color:var(--muted);font-size:11px">Lade Kalender... (Finnhub API Key in Settings benoetigt)</div></div>
+    <div id="kal-rows"><div style="padding:20px;color:var(--muted);font-size:11px" data-i18n="loading_cal">Lade Kalender... (Finnhub API Key in Settings benoetigt)</div></div>
   </div>
 </div>
 
@@ -2854,7 +2857,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <div class="bot-header">
     <div>
       <div class="bot-title" style="color:var(--funding)">FUNDING BOT</div>
-      <div class="bot-meta">Beobachtungs-Modus: zeigt Funding-Rate-Opportunities, platziert aber KEINE echten Orders. "Verdient" ist eine Schaetzung.</div>
+      <div class="bot-meta" data-i18n="meta_funding">Beobachtungs-Modus: zeigt Funding-Rate-Opportunities, platziert aber KEINE echten Orders. "Verdient" ist eine Schaetzung.</div>
     </div>
     <div style="display:flex;gap:10px;align-items:center">
       <button class="btn-help" onclick="showHelp('funding')" title="Erklaerung">?</button>
@@ -2863,19 +2866,19 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
     </div>
   </div>
   <div class="grid g3" style="margin-bottom:14px">
-    <div class="card"><div class="card-label">Balance</div>
+    <div class="card"><div class="card-label" data-i18n="balance">Balance</div>
       <div class="card-value blue" id="f-balance">0.00</div><div class="card-sub">USDT</div></div>
-    <div class="card"><div class="card-label">Verdient (est.)</div>
-      <div class="card-value green" id="f-earned">0.0000</div><div class="card-sub">USDT Funding</div></div>
-    <div class="card"><div class="card-label">Opportunities</div>
-      <div class="card-value white" id="f-opps">0</div><div class="card-sub">Ueber Schwelle</div></div>
+    <div class="card"><div class="card-label" data-i18n="earned">Verdient (est.)</div>
+      <div class="card-value green" id="f-earned">0.0000</div><div class="card-sub" data-i18n="usdt_funding">USDT Funding</div></div>
+    <div class="card"><div class="card-label" data-i18n="opportunities">Opportunities</div>
+      <div class="card-value white" id="f-opps">0</div><div class="card-sub" data-i18n="over_thresh">Ueber Schwelle</div></div>
   </div>
   <div class="pnl-card">
-    <div class="pnl-card-label"><span>Kumulierter Funding-Ertrag</span><span id="f-trend" class="trend-flat">- -</span></div>
+    <div class="pnl-card-label"><span data-i18n="funding_cum">Kumulierter Funding-Ertrag</span><span id="f-trend" class="trend-flat">- -</span></div>
     <svg class="spark" id="f-spark" viewBox="0 0 400 40" preserveAspectRatio="none"></svg>
   </div>
   <div class="rate-table">
-    <div class="rt-head"><span>Symbol</span><span>Funding Rate</span><span>Est. / 8h</span><span class="rt-col-dir">Strategie</span></div>
+    <div class="rt-head"><span>Symbol</span><span>Funding Rate</span><span>Est. / 8h</span><span class="rt-col-dir" data-i18n="strategy">Strategie</span></div>
     <div id="f-rates"></div>
   </div>
   <div class="log-wrap">
@@ -2889,7 +2892,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <div class="bot-header">
     <div>
       <div class="bot-title" style="color:var(--dca)">DCA BOT</div>
-      <div class="bot-meta">Zeitbasiertes Kaufen mit Durchschnittskosteneffekt</div>
+      <div class="bot-meta" data-i18n="meta_dca">Zeitbasiertes Kaufen mit Durchschnittskosteneffekt</div>
     </div>
     <div style="display:flex;gap:10px;align-items:center">
       <button class="btn-help" onclick="showHelp('dca')" title="Erklaerung">?</button>
@@ -2898,17 +2901,17 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
     </div>
   </div>
   <div class="grid g4" style="margin-bottom:14px">
-    <div class="card"><div class="card-label">Balance</div>
+    <div class="card"><div class="card-label" data-i18n="balance">Balance</div>
       <div class="card-value blue" id="d-balance">0.00</div><div class="card-sub">USDT</div></div>
-    <div class="card"><div class="card-label">Investiert</div>
-      <div class="card-value white" id="d-invested">0.00</div><div class="card-sub">USDT gesamt</div></div>
+    <div class="card"><div class="card-label" data-i18n="invested">Investiert</div>
+      <div class="card-value white" id="d-invested">0.00</div><div class="card-sub" data-i18n="usdt_total">USDT gesamt</div></div>
     <div class="card"><div class="card-label">PnL</div>
       <div class="card-value" id="d-pnl">+0.00</div><div class="card-sub" id="d-avg">Avg: –</div></div>
-    <div class="card"><div class="card-label">Naechster Kauf</div>
-      <div class="card-value amber" id="d-next" style="font-size:14px">–</div><div class="card-sub" id="d-buys">0 Kaeufe</div></div>
+    <div class="card"><div class="card-label" data-i18n="next_buy">Naechster Kauf</div>
+      <div class="card-value amber" id="d-next" style="font-size:14px">–</div><div class="card-sub" id="d-buys">0</div></div>
   </div>
   <div class="pnl-card">
-    <div class="pnl-card-label"><span>PnL-Verlauf</span><span id="d-trend" class="trend-flat">- -</span></div>
+    <div class="pnl-card-label"><span data-i18n="pnl_history">PnL-Verlauf</span><span id="d-trend" class="trend-flat">- -</span></div>
     <svg class="spark" id="d-spark" viewBox="0 0 400 40" preserveAspectRatio="none"></svg>
   </div>
   <div class="log-wrap">
@@ -2930,7 +2933,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
           <option>BTCUSDT</option><option>ETHUSDT</option><option>SOLUSDT</option>
           <option>XRPUSDT</option><option>DOGEUSDT</option>
         </select></div>
-      <div><div class="card-label" style="margin-bottom:4px">Zeitraum</div>
+      <div><div class="card-label" style="margin-bottom:4px" data-i18n="bt_period">Zeitraum</div>
         <select id="bt-days" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%">
           <option value="7">7 Tage</option><option value="14" selected>14 Tage</option>
           <option value="30">30 Tage</option><option value="60">60 Tage</option>
@@ -2938,10 +2941,10 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
           <option value="365">365 Tage (1 Jahr)</option>
           <option value="730">730 Tage (2 Jahre)</option>
         </select></div>
-      <div><div class="card-label" style="margin-bottom:4px">Hebel</div>
+      <div><div class="card-label" style="margin-bottom:4px" data-i18n="bt_lever">Hebel</div>
         <input type="number" id="bt-lever" value="3" min="1" max="10"
           style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%"></div>
-      <div><div class="card-label" style="margin-bottom:4px">Signal-Schwelle (1-3)</div>
+      <div><div class="card-label" style="margin-bottom:4px" data-i18n="bt_thresh">Signal-Schwelle (1-3)</div>
         <input type="number" id="bt-thresh" value="2" min="1" max="3"
           style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%"></div>
       <div><div class="card-label" style="margin-bottom:4px">Stop Loss %</div>
@@ -2977,7 +2980,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="card-sub">Gut: >1.5 | Sehr gut: >2.0</div>
       </div>
       <div class="card" style="padding:10px">
-        <div class="card-label">Gebuehren gesamt</div>
+        <div class="card-label" data-i18n="bt_fees_total">Gebuehren gesamt</div>
         <div class="card-value" id="bt-fees" style="color:var(--red)">-</div>
         <div class="card-sub">0.04% Taker pro Trade</div>
       </div>
@@ -2989,7 +2992,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
     </div>
     <div class="ov-table">
       <div class="ov-head" style="grid-template-columns:70px 80px 80px 70px 70px 60px">
-        <span>Seite</span><span>Einstieg</span><span>Ausstieg</span><span>PnL</span><span>Gebuehr</span><span>Erg.</span>
+        <span data-i18n="pos_side">Seite</span><span data-i18n="bt_entry">Einstieg</span><span data-i18n="bt_exit">Ausstieg</span><span>PnL</span><span data-i18n="th_fee">Gebuehr</span><span data-i18n="bt_res">Erg.</span>
       </div>
       <div id="bt-trades"></div>
     </div>
@@ -2998,7 +3001,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
     <div style="font-size:11px;font-weight:700;color:var(--muted);letter-spacing:.08em;margin-bottom:10px">SYMBOL-VERGLEICH</div>
     <div class="ov-table">
       <div class="ov-head" style="grid-template-columns:90px 1fr 70px 70px 70px 70px 70px">
-        <span>Symbol</span><span>Trades / Win%</span><span>PnL</span><span>Sharpe</span><span>Drawdown</span><span>Gebuehren</span><span>Endkapital</span>
+        <span>Symbol</span><span>Trades / Win%</span><span>PnL</span><span>Sharpe</span><span>Drawdown</span><span data-i18n="bt_fees">Gebuehren</span><span data-i18n="bt_final">Endkapital</span>
       </div>
       <div id="bt-multi-rows"></div>
     </div>
@@ -3130,7 +3133,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
     </div>
     <div class="grid g2" style="gap:10px;margin-bottom:10px">
       <div>
-        <div class="card-label" style="margin-bottom:4px">Wert / Schwelle</div>
+        <div class="card-label" style="margin-bottom:4px" data-i18n="al_value">Wert / Schwelle</div>
         <input type="number" id="al-value" placeholder="z.B. 100000"
           style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%">
       </div>
@@ -3147,26 +3150,28 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
 
   <!-- AKTIVE ALERTS -->
   <div class="log-wrap">
-    <div class="log-head"><span>Aktive Alerts</span><span id="al-count">0</span></div>
+    <div class="log-head"><span data-i18n="active_alerts">Aktive Alerts</span><span id="al-count">0</span></div>
     <div id="al-list" style="padding:8px 0"></div>
   </div>
 
   <!-- ALERT LOG -->
   <div class="log-wrap" style="margin-top:10px">
-    <div class="log-head"><span>Letzte Ausloeser</span><button onclick="loadAlertLog()" style="background:none;border:none;color:var(--muted);font-family:inherit;font-size:10px;cursor:pointer">Aktualisieren</button></div>
+    <div class="log-head"><span data-i18n="last_triggers">Letzte Ausloeser</span><button onclick="loadAlertLog()" style="background:none;border:none;color:var(--muted);font-family:inherit;font-size:10px;cursor:pointer" data-i18n="refresh">Aktualisieren</button></div>
     <div class="log-body" id="al-log"></div>
   </div>
 </div>
 <div id="panel-settings" class="panel">
-  <div style="max-width:700px">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)">EINSTELLUNGEN</span>
-      <button class="btn-help" onclick="showHelp('settings')" title="Erklaerung">?</button>
-    </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;max-width:1500px">
+    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="set_head">EINSTELLUNGEN</span>
+    <button class="btn-help" onclick="showHelp('settings')" title="Erklaerung">?</button>
+  </div>
+  <div class="settings-grid">
+   <!-- ===== LINKE SPALTE: Modus / Presets / Zugang / globale Keys ===== -->
+   <div class="settings-col">
 
     <!-- LIVE / DEMO TOGGLE -->
     <div class="settings-section" style="margin-bottom:10px">
-      <div class="settings-head" onclick="toggle('s-mode')"><span>Handelsmodus</span><span style="color:var(--muted)">▾</span></div>
+      <div class="settings-head" onclick="toggle('s-mode')"><span data-i18n="set_mode_head">Handelsmodus</span><span style="color:var(--muted)">▾</span></div>
       <div id="s-mode" class="settings-body open">
         <div class="toggle-wrap">
           <label class="toggle">
@@ -3175,10 +3180,10 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
           </label>
           <div>
             <div id="mode-label" style="font-size:12px;font-weight:600;color:var(--grid)">DEMO-MODUS aktiv</div>
-            <div style="font-size:10px;color:var(--muted);margin-top:2px">Demo = paptrading:1 (kein echtes Geld). Live = echte Orders auf Bitget.</div>
+            <div style="font-size:10px;color:var(--muted);margin-top:2px" data-i18n="set_mode_hint">Demo = paptrading:1 (kein echtes Geld). Live = echte Orders auf Bitget.</div>
           </div>
         </div>
-        <div style="font-size:10px;color:var(--dca);background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2);border-radius:5px;padding:8px;margin-top:6px">
+        <div style="font-size:10px;color:var(--dca);background:rgba(251,191,36,.06);border:1px solid rgba(251,191,36,.2);border-radius:5px;padding:8px;margin-top:6px" data-i18n="set_mode_warn">
           ⚠️ Nach dem Wechsel alle laufenden Bots neu starten, damit der neue Modus greift.
         </div>
       </div>
@@ -3186,9 +3191,9 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
 
     <!-- STRATEGIE-VORLAGEN -->
     <div class="settings-section" style="margin-bottom:10px">
-      <div class="settings-head" onclick="toggle('s-presets')"><span>Strategie-Vorlagen (Presets)</span><span style="color:var(--muted)">▾</span></div>
+      <div class="settings-head" onclick="toggle('s-presets')"><span data-i18n="set_presets_head">Strategie-Vorlagen (Presets)</span><span style="color:var(--muted)">▾</span></div>
       <div id="s-presets" class="settings-body open">
-        <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.6">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.6" data-i18n="set_presets_hint">
           Presets fuellen die Signal- und Grid-Bot-Felder automatisch aus. Danach noch API Keys eintragen.
         </div>
         <div class="preset-wrap">
@@ -3202,36 +3207,36 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
 
     <!-- DASHBOARD ZUGANG -->
     <div class="settings-section">
-      <div class="settings-head" onclick="toggle('s-auth')"><span>Dashboard-Zugang</span><span style="color:var(--muted)">▾</span></div>
+      <div class="settings-head" onclick="toggle('s-auth')"><span data-i18n="set_auth_head">Dashboard-Zugang</span><span style="color:var(--muted)">▾</span></div>
       <div id="s-auth" class="settings-body open">
-        <div style="background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.2);border-radius:5px;padding:9px 12px;margin-bottom:12px;font-size:11px;color:var(--red)">
+        <div style="background:rgba(248,113,113,.07);border:1px solid rgba(248,113,113,.2);border-radius:5px;padding:9px 12px;margin-bottom:12px;font-size:11px;color:var(--red)" data-i18n="set_auth_hint">
           Beim ersten Start wurde ein zufaelliges Passwort generiert (siehe platform.log). Hier aendern und SPEICHERN nicht vergessen - danach fragt der Browser beim naechsten Laden neu nach Login.
         </div>
-        <div class="field-row"><label>Benutzername</label>
+        <div class="field-row"><label data-i18n="lbl_user">Benutzername</label>
           <input type="text" id="cfg-dash-user" placeholder="admin"></div>
-        <div class="field-row"><label>Passwort</label>
-          <input type="text" id="cfg-dash-pass" placeholder="Leer lassen = unveraendert"></div>
+        <div class="field-row"><label data-i18n="lbl_pass">Passwort</label>
+          <input type="text" id="cfg-dash-pass" data-i18n-ph="ph_pass_unchanged" placeholder="Leer lassen = unveraendert"></div>
       </div>
     </div>
 
     <!-- GLOBALE KEYS -->
     <div class="settings-section">
-      <div class="settings-head" onclick="toggle('s-global')"><span>Globale API-Keys</span><span style="color:var(--muted)">▾</span></div>
+      <div class="settings-head" onclick="toggle('s-global')"><span data-i18n="set_global_head">Globale API-Keys</span><span style="color:var(--muted)">▾</span></div>
       <div id="s-global" class="settings-body open">
-        <div style="background:rgba(0,214,143,.07);border:1px solid rgba(0,214,143,.2);border-radius:5px;padding:9px 12px;margin-bottom:12px;font-size:11px;color:var(--signal)">
+        <div style="background:rgba(0,214,143,.07);border:1px solid rgba(0,214,143,.2);border-radius:5px;padding:9px 12px;margin-bottom:12px;font-size:11px;color:var(--signal)" data-i18n="set_global_hint">
           Wichtig: Nach dem Eintragen immer unten auf SPEICHERN klicken, dann START druecken.
         </div>
         <div class="field-row"><label>Finnhub API Key</label>
-          <input type="text" id="cfg-finnhub" placeholder="Fuer Makro-Kalender (kostenlos)"></div>
+          <input type="text" id="cfg-finnhub" data-i18n-ph="ph_finnhub" placeholder="Fuer Makro-Kalender (kostenlos)"></div>
         <div class="field-row"><label>Coinalyze API Key</label>
-          <input type="text" id="cfg-coinalyze" placeholder="Fuer Derivate-Tab (kostenlos, coinalyze.net)"></div>
+          <input type="text" id="cfg-coinalyze" data-i18n-ph="ph_coinalyze" placeholder="Fuer Derivate-Tab (kostenlos, coinalyze.net)"></div>
         <div class="field-row"><label>Telegram Bot Token</label>
           <input type="text" id="cfg-tg-token" placeholder="123456:ABC-DEF... von @BotFather"></div>
         <div class="field-row"><label>Telegram Chat ID</label>
-          <input type="text" id="cfg-tg-chat" placeholder="Deine Chat-ID (z.B. 123456789)"></div>
+          <input type="text" id="cfg-tg-chat" data-i18n-ph="ph_tg_chat" placeholder="Deine Chat-ID (z.B. 123456789)"></div>
         <div class="field-row"><label>Discord Webhook URL</label>
           <input type="text" id="cfg-discord-wh" placeholder="https://discord.com/api/webhooks/..."></div>
-        <div class="settings-note">
+        <div class="settings-note" data-i18n="set_notify_note">
           Telegram: @BotFather → /newbot → Token. Chat-ID von @userinfobot.<br>
           Discord: Server-Einstellungen → Integrationen → Webhooks → URL kopieren.<br>
           Beide koennen gleichzeitig aktiv sein. News-Sentiment: CoinGecko (kostenlos, kein Key).
@@ -3239,32 +3244,36 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
       </div>
     </div>
 
+   </div>
+   <!-- ===== RECHTE SPALTE: die 4 Bots ===== -->
+   <div class="settings-col">
+
     <!-- SIGNAL BOT -->
     <div class="settings-section">
       <div class="settings-head" onclick="toggle('s-signal')" style="color:var(--signal)"><span>Signal Bot – Sub-Account API</span><span style="color:var(--muted)">▾</span></div>
       <div id="s-signal" class="settings-body">
         <div class="preset-wrap" style="margin-bottom:12px">
-          <span style="font-size:10px;color:var(--muted);margin-right:6px">Preset:</span>
-          <button class="preset-btn low"    onclick="applyBotPreset('signal','low')">KONSERVATIV</button>
-          <button class="preset-btn med"    onclick="applyBotPreset('signal','medium')">STANDARD</button>
-          <button class="preset-btn degen"  onclick="applyBotPreset('signal','high')">AGGRESSIV</button>
+          <span style="font-size:10px;color:var(--muted);margin-right:6px" data-i18n="set_preset">Preset:</span>
+          <button class="preset-btn low"    onclick="applyBotPreset('signal','low')" data-i18n="bp_cons">KONSERVATIV</button>
+          <button class="preset-btn med"    onclick="applyBotPreset('signal','medium')" data-i18n="bp_std">STANDARD</button>
+          <button class="preset-btn degen"  onclick="applyBotPreset('signal','high')" data-i18n="bp_agg">AGGRESSIV</button>
         </div>
         <div class="field-row"><label>API Key</label><input type="text" id="sig-key" placeholder="Bitget API Key"></div>
         <div class="field-row"><label>API Secret</label><input type="password" id="sig-sec" placeholder="Bitget API Secret"></div>
         <div class="field-row"><label>Passphrase</label><input type="password" id="sig-pass" placeholder="Bitget Passphrase"></div>
         <div class="field-row"><label>Leverage (1-10)</label><input type="number" id="sig-lever" placeholder="3" min="1" max="10"></div>
-        <div class="field-row"><label>Risiko pro Trade (%)</label><input type="number" id="sig-risk-pct" placeholder="3.0" step="0.5" min="0.5" max="10"></div>
-        <div class="field-row"><label>USDT pro Trade (fallback)</label><input type="number" id="sig-usdt" placeholder="30" min="5"></div>
-        <div class="field-row"><label>Max. gleichzeitige Pos.</label><input type="number" id="sig-max-conc" placeholder="2" min="1" max="4"></div>
-        <div class="field-row"><label>Korrelations-Filter</label><input type="checkbox" id="sig-corr-filter" style="width:auto"></div>
-        <div class="field-row"><label>Max. Korrelation (0.5-1.0)</label><input type="number" id="sig-max-corr" placeholder="0.85" step="0.05" min="0.5" max="1.0"></div>
-        <div class="settings-note">Korrelations-Filter: verhindert, dass der Bot eine neue Position eroeffnet, die zu stark mit einer bereits offenen, gleichgerichteten Position korreliert (Diversifikation). Bei fehlenden Daten wird normal weitergehandelt.</div>
-        <div class="field-row"><label>ADX-Trendfilter</label><input type="checkbox" id="sig-adx-filter" style="width:auto"></div>
-        <div class="field-row"><label>Min. ADX (10-40)</label><input type="number" id="sig-min-adx" placeholder="20" step="1" min="10" max="40"></div>
-        <div class="settings-note">ADX-Trendfilter: daempft das Signal, wenn kein klarer Trend da ist (ADX unter Schwelle) – handelt weniger im Seitwaerts-Gezappel. Fail-open bei zu wenig Daten.</div>
-        <div class="field-row"><label>Order-Book-Kaufdruck</label><input type="checkbox" id="sig-ob-signal" style="width:auto"></div>
-        <div class="settings-note">Order-Book-Kaufdruck: bezieht den Kauf-/Verkaufsdruck aus dem Live-Orderbuch als zusaetzlichen Signal-Faktor mit ein. Fail-open, wenn keine Daten verfuegbar sind.</div>
-        <div class="field-row"><label>Signal-Schwelle (2-5)</label><input type="number" id="sig-thresh" placeholder="3" min="2" max="5"></div>
+        <div class="field-row"><label data-i18n="lbl_risk_trade">Risiko pro Trade (%)</label><input type="number" id="sig-risk-pct" placeholder="3.0" step="0.5" min="0.5" max="10"></div>
+        <div class="field-row"><label data-i18n="lbl_usdt_trade">USDT pro Trade (fallback)</label><input type="number" id="sig-usdt" placeholder="30" min="5"></div>
+        <div class="field-row"><label data-i18n="lbl_max_conc">Max. gleichzeitige Pos.</label><input type="number" id="sig-max-conc" placeholder="2" min="1" max="4"></div>
+        <div class="field-row"><label data-i18n="lbl_corr_filter">Korrelations-Filter</label><input type="checkbox" id="sig-corr-filter" style="width:auto"></div>
+        <div class="field-row"><label data-i18n="lbl_max_corr">Max. Korrelation (0.5-1.0)</label><input type="number" id="sig-max-corr" placeholder="0.85" step="0.05" min="0.5" max="1.0"></div>
+        <div class="settings-note" data-i18n="note_corr">Korrelations-Filter: verhindert, dass der Bot eine neue Position eroeffnet, die zu stark mit einer bereits offenen, gleichgerichteten Position korreliert (Diversifikation). Bei fehlenden Daten wird normal weitergehandelt.</div>
+        <div class="field-row"><label data-i18n="lbl_adx_filter">ADX-Trendfilter</label><input type="checkbox" id="sig-adx-filter" style="width:auto"></div>
+        <div class="field-row"><label data-i18n="lbl_min_adx">Min. ADX (10-40)</label><input type="number" id="sig-min-adx" placeholder="20" step="1" min="10" max="40"></div>
+        <div class="settings-note" data-i18n="note_adx">ADX-Trendfilter: daempft das Signal, wenn kein klarer Trend da ist (ADX unter Schwelle) – handelt weniger im Seitwaerts-Gezappel. Fail-open bei zu wenig Daten.</div>
+        <div class="field-row"><label data-i18n="lbl_ob">Order-Book-Kaufdruck</label><input type="checkbox" id="sig-ob-signal" style="width:auto"></div>
+        <div class="settings-note" data-i18n="note_ob">Order-Book-Kaufdruck: bezieht den Kauf-/Verkaufsdruck aus dem Live-Orderbuch als zusaetzlichen Signal-Faktor mit ein. Fail-open, wenn keine Daten verfuegbar sind.</div>
+        <div class="field-row"><label data-i18n="lbl_sig_thresh">Signal-Schwelle (2-5)</label><input type="number" id="sig-thresh" placeholder="3" min="2" max="5"></div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('signal')">Verbindung testen</button>
           <span class="val-result" id="val-signal"></span>
@@ -3276,16 +3285,16 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
     <div class="settings-section">
       <div class="settings-head" onclick="toggle('s-grid')" style="color:var(--grid)"><span>Grid Bot – Sub-Account API</span><span style="color:var(--muted)">▾</span></div>
       <div id="s-grid" class="settings-body">
-        <div style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.2);border-radius:5px;padding:9px 12px;margin-bottom:12px;font-size:10px;color:var(--red);line-height:1.7">
+        <div style="background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.2);border-radius:5px;padding:9px 12px;margin-bottom:12px;font-size:10px;color:var(--red);line-height:1.7" data-i18n="grid_oneway_warn">
           <b>WICHTIG:</b> Bitget Sub-Account muss auf <b>One-Way Mode</b> stehen!<br>
           Bitget App: Futures-Handel -> Einstellungen -> Positionsmodus -> One-Way Mode.<br>
           Im Hedge-Modus oeffnet der Grid Bot ungewollt gegenlaeutige Positionen.
         </div>
         <div class="preset-wrap" style="margin-bottom:12px">
-          <span style="font-size:10px;color:var(--muted);margin-right:6px">Preset:</span>
-          <button class="preset-btn low"   onclick="applyBotPreset('grid','low')">KONSERVATIV</button>
-          <button class="preset-btn med"   onclick="applyBotPreset('grid','medium')">STANDARD</button>
-          <button class="preset-btn degen" onclick="applyBotPreset('grid','high')">AGGRESSIV</button>
+          <span style="font-size:10px;color:var(--muted);margin-right:6px" data-i18n="set_preset">Preset:</span>
+          <button class="preset-btn low"   onclick="applyBotPreset('grid','low')" data-i18n="bp_cons">KONSERVATIV</button>
+          <button class="preset-btn med"   onclick="applyBotPreset('grid','medium')" data-i18n="bp_std">STANDARD</button>
+          <button class="preset-btn degen" onclick="applyBotPreset('grid','high')" data-i18n="bp_agg">AGGRESSIV</button>
         </div>
         <div class="field-row"><label>API Key</label><input type="text" id="grd-key" placeholder="Bitget API Key"></div>
         <div class="field-row"><label>API Secret</label><input type="password" id="grd-sec" placeholder="Bitget API Secret"></div>
@@ -3305,9 +3314,9 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
             <option value="DOTUSDT">DOTUSDT – Polkadot</option>
           </select>
         </div>
-        <div class="field-row"><label>Preis oben (0 = auto)</label><input type="number" id="grd-upper" placeholder="0" min="0"></div>
-        <div class="field-row"><label>Preis unten (0 = auto)</label><input type="number" id="grd-lower" placeholder="0" min="0"></div>
-        <div class="field-row"><label>Anzahl Levels</label><input type="number" id="grd-n" placeholder="10" min="2" max="50"></div>
+        <div class="field-row"><label data-i18n="lbl_price_up">Preis oben (0 = auto)</label><input type="number" id="grd-upper" placeholder="0" min="0"></div>
+        <div class="field-row"><label data-i18n="lbl_price_low">Preis unten (0 = auto)</label><input type="number" id="grd-lower" placeholder="0" min="0"></div>
+        <div class="field-row"><label data-i18n="lbl_levels">Anzahl Levels</label><input type="number" id="grd-n" placeholder="10" min="2" max="50"></div>
         <div class="field-row"><label>Investment (USDT)</label><input type="number" id="grd-inv" placeholder="100" min="10"></div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('grid')">Verbindung testen</button>
@@ -3321,16 +3330,16 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
       <div class="settings-head" onclick="toggle('s-funding')" style="color:var(--funding)"><span>Funding Bot – Sub-Account API</span><span style="color:var(--muted)">▾</span></div>
       <div id="s-funding" class="settings-body">
         <div class="preset-wrap" style="margin-bottom:12px">
-          <span style="font-size:10px;color:var(--muted);margin-right:6px">Preset:</span>
-          <button class="preset-btn low"   onclick="applyBotPreset('funding','low')">KONSERVATIV</button>
-          <button class="preset-btn med"   onclick="applyBotPreset('funding','medium')">STANDARD</button>
-          <button class="preset-btn degen" onclick="applyBotPreset('funding','high')">AGGRESSIV</button>
+          <span style="font-size:10px;color:var(--muted);margin-right:6px" data-i18n="set_preset">Preset:</span>
+          <button class="preset-btn low"   onclick="applyBotPreset('funding','low')" data-i18n="bp_cons">KONSERVATIV</button>
+          <button class="preset-btn med"   onclick="applyBotPreset('funding','medium')" data-i18n="bp_std">STANDARD</button>
+          <button class="preset-btn degen" onclick="applyBotPreset('funding','high')" data-i18n="bp_agg">AGGRESSIV</button>
         </div>
         <div class="field-row"><label>API Key</label><input type="text" id="fnd-key" placeholder="Bitget API Key"></div>
         <div class="field-row"><label>API Secret</label><input type="password" id="fnd-sec" placeholder="Bitget API Secret"></div>
         <div class="field-row"><label>Passphrase</label><input type="password" id="fnd-pass" placeholder="Bitget Passphrase"></div>
-        <div class="field-row"><label>Min. Funding Rate (%)</label><input type="number" id="fnd-minrate" placeholder="0.03" step="0.001"></div>
-        <div class="field-row"><label>Max. Position (USDT)</label><input type="number" id="fnd-maxpos" placeholder="200" min="10"></div>
+        <div class="field-row"><label data-i18n="lbl_min_funding">Min. Funding Rate (%)</label><input type="number" id="fnd-minrate" placeholder="0.03" step="0.001"></div>
+        <div class="field-row"><label data-i18n="lbl_max_pos">Max. Position (USDT)</label><input type="number" id="fnd-maxpos" placeholder="200" min="10"></div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('funding')">Verbindung testen</button>
           <span class="val-result" id="val-funding"></span>
@@ -3343,12 +3352,12 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
       <div class="settings-head" onclick="toggle('s-dca')" style="color:var(--dca)"><span>DCA Bot – Sub-Account API</span><span style="color:var(--muted)">▾</span></div>
       <div id="s-dca" class="settings-body">
         <div class="preset-wrap" style="margin-bottom:12px">
-          <span style="font-size:10px;color:var(--muted);margin-right:6px">Preset:</span>
-          <button class="preset-btn low"   onclick="applyBotPreset('dca','low')">KONSERVATIV</button>
-          <button class="preset-btn med"   onclick="applyBotPreset('dca','medium')">STANDARD</button>
-          <button class="preset-btn degen" onclick="applyBotPreset('dca','high')">AGGRESSIV</button>
+          <span style="font-size:10px;color:var(--muted);margin-right:6px" data-i18n="set_preset">Preset:</span>
+          <button class="preset-btn low"   onclick="applyBotPreset('dca','low')" data-i18n="bp_cons">KONSERVATIV</button>
+          <button class="preset-btn med"   onclick="applyBotPreset('dca','medium')" data-i18n="bp_std">STANDARD</button>
+          <button class="preset-btn degen" onclick="applyBotPreset('dca','high')" data-i18n="bp_agg">AGGRESSIV</button>
         </div>
-        <div style="background:rgba(0,214,143,.06);border:1px solid rgba(0,214,143,.15);border-radius:5px;padding:8px 12px;margin-bottom:12px;font-size:10px;color:var(--signal)">
+        <div style="background:rgba(0,214,143,.06);border:1px solid rgba(0,214,143,.15);border-radius:5px;padding:8px 12px;margin-bottom:12px;font-size:10px;color:var(--signal)" data-i18n="dca_spot_note">
           DCA kauft immer auf dem Spot-Markt (kein Hebel, keine Funding-Kosten). Das Guthaben muss auf dem Spot-Konto des Sub-Accounts liegen.
         </div>
         <div class="field-row"><label>API Key</label><input type="text" id="dca-key" placeholder="Bitget API Key"></div>
@@ -3366,13 +3375,13 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
             <option value="ADAUSDT">ADAUSDT – Cardano</option>
           </select>
         </div>
-        <div class="field-row"><label>Interval (Stunden)</label><input type="number" id="dca-hrs" placeholder="24" min="1"></div>
-        <div class="field-row"><label>Betrag pro Kauf (USDT)</label><input type="number" id="dca-amt" placeholder="20" min="5"></div>
+        <div class="field-row"><label data-i18n="lbl_interval">Interval (Stunden)</label><input type="number" id="dca-hrs" placeholder="24" min="1"></div>
+        <div class="field-row"><label data-i18n="lbl_amount_buy">Betrag pro Kauf (USDT)</label><input type="number" id="dca-amt" placeholder="20" min="5"></div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('dca')">Verbindung testen</button>
           <span class="val-result" id="val-dca"></span>
         </div>
-        <div class="settings-note">
+        <div class="settings-note" data-i18n="dca_conn_note">
           Verbindungstest zeigt Spot-Balance (genutztes Kapital) und Futures-Balance getrennt.<br>
           Tipp: Fuer DCA nur Spot-Guthaben aufbuchen, Futures-Konto leer lassen.
         </div>
@@ -3380,9 +3389,11 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
     </div>
 
     <div class="save-row">
-      <button class="btn btn-save" onclick="saveSettings()">EINSTELLUNGEN SPEICHERN</button>
-      <span class="save-msg" id="save-msg">Gespeichert.</span>
+      <button class="btn btn-save save-btn" onclick="saveSettings()" data-i18n="settings_save">EINSTELLUNGEN SPEICHERN</button>
+      <span class="save-msg" id="save-msg" data-i18n="saved_msg">Gespeichert.</span>
     </div>
+
+   </div>
   </div>
 </div>
 
@@ -3445,6 +3456,26 @@ const STRINGS = {
     // Card labels
     balance:'Balance', total_balance:'Gesamt Balance',
     total_pnl:'Gesamt PnL', active_bots:'Aktive Bots',
+    total_pnl_nofund:'Gesamt PnL (ohne Funding)', running_total:'Laufen / Gesamt',
+    all_bots:'Alle Bots', th_action:'Aktion', no_finnhub:'Kein Finnhub Key gesetzt',
+    pos_side:'Seite', pos_size:'Groesse', pos_entry:'Einstieg', pos_lev:'Hebel',
+    pnl_history:'PnL-Verlauf', no_blackout:'Kein Blackout', grid_profits:'Grid-Gewinne',
+    th_price:'Preis', th_high24:'24h Hoch', th_low24:'24h Tief', th_vol_m:'Volumen (Mio $)',
+    loading:'Lade...', loading_market:'Lade Marktdaten...', click_load:'Auf "Laden" klicken.',
+    th_time:'Zeit', th_qty:'Menge', th_fee:'Gebuehr',
+    kal_time:'Zeit (UTC)', kal_country:'Land', kal_event:'Ereignis', kal_actual:'Aktuell', kal_forecast:'Prognose',
+    loading_cal:'Lade Kalender... (Finnhub API Key in Settings benoetigt)',
+    over_thresh:'Ueber Schwelle', strategy:'Strategie',
+    bt_fees_total:'Gebuehren gesamt', bt_entry:'Einstieg', bt_exit:'Ausstieg', bt_res:'Erg.', bt_final:'Endkapital', bt_fees:'Gebuehren',
+    alert_value:'Wert / Schwelle', active_alerts:'Aktive Alerts', last_triggers:'Letzte Ausloeser',
+    executed:'Ausgefuehrt', cur_streak:'aktuell', usdt_funding:'USDT Funding',
+    filled_levels:'Gefuellte Level', usdt_total:'USDT gesamt', funding_cum:'Kumulierter Funding-Ertrag',
+    econ_cal:'WIRTSCHAFTSKALENDER', reload:'Neu laden', filter_all:'ALLE',
+    us_blackout:'US BLACKOUT AKTIV - Signal Bot oeffnet keine neuen Positionen',
+    meta_signal:'RSI · EMA · MACD · Funding · Makro | 3x Hebel',
+    meta_grid:'Automatische Kauf/Verkauf-Level im Preis-Raster',
+    meta_funding:'Beobachtungs-Modus: zeigt Funding-Rate-Opportunities, platziert aber KEINE echten Orders. "Verdient" ist eine Schaetzung.',
+    meta_dca:'Zeitbasiertes Kaufen mit Durchschnittskosteneffekt',
     total_trades:'Trades Gesamt', pnl:'PnL', trades:'Trades',
     macro:'Makro', invested:'Investiert', next_buy:'Naechster Kauf',
     earned:'Verdient (est.)', opportunities:'Opportunities',
@@ -3479,6 +3510,38 @@ const STRINGS = {
     settings_save:'EINSTELLUNGEN SPEICHERN',
     settings_note:'Wichtig: Nach dem Eintragen immer unten auf SPEICHERN klicken.',
     mode_demo:'DEMO-MODUS', mode_live:'LIVE-MODUS',
+    saved_msg:'Gespeichert.',
+    confirm_live:'LIVE-MODUS AKTIVIEREN? Echte Orders mit echtem Geld. Alle laufenden Bots danach neu starten!',
+    mode_demo_active:'DEMO-MODUS aktiv', mode_live_active:'LIVE-MODUS aktiv',
+    set_head:'EINSTELLUNGEN',
+    set_mode_head:'Handelsmodus',
+    set_mode_hint:'Demo = paptrading:1 (kein echtes Geld). Live = echte Orders auf Bitget.',
+    set_mode_warn:'⚠️ Nach dem Wechsel alle laufenden Bots neu starten, damit der neue Modus greift.',
+    set_presets_head:'Strategie-Vorlagen (Presets)',
+    set_presets_hint:'Presets fuellen die Signal- und Grid-Bot-Felder automatisch aus. Danach noch API Keys eintragen.',
+    set_auth_head:'Dashboard-Zugang',
+    set_auth_hint:'Beim ersten Start wurde ein zufaelliges Passwort generiert (siehe platform.log). Hier aendern und SPEICHERN nicht vergessen - danach fragt der Browser beim naechsten Laden neu nach Login.',
+    lbl_user:'Benutzername', lbl_pass:'Passwort', ph_pass_unchanged:'Leer lassen = unveraendert',
+    set_global_head:'Globale API-Keys',
+    set_global_hint:'Wichtig: Nach dem Eintragen immer unten auf SPEICHERN klicken, dann START druecken.',
+    ph_finnhub:'Fuer Makro-Kalender (kostenlos)', ph_coinalyze:'Fuer Derivate-Tab (kostenlos, coinalyze.net)',
+    ph_tg_chat:'Deine Chat-ID (z.B. 123456789)',
+    set_notify_note:'Telegram: @BotFather → /newbot → Token. Chat-ID von @userinfobot.<br>Discord: Server-Einstellungen → Integrationen → Webhooks → URL kopieren.<br>Beide koennen gleichzeitig aktiv sein. News-Sentiment: CoinGecko (kostenlos, kein Key).',
+    set_preset:'Preset:', bp_cons:'KONSERVATIV', bp_std:'STANDARD', bp_agg:'AGGRESSIV',
+    lbl_risk_trade:'Risiko pro Trade (%)', lbl_usdt_trade:'USDT pro Trade (fallback)',
+    lbl_max_conc:'Max. gleichzeitige Pos.', lbl_corr_filter:'Korrelations-Filter', lbl_max_corr:'Max. Korrelation (0.5-1.0)',
+    note_corr:'Korrelations-Filter: verhindert, dass der Bot eine neue Position eroeffnet, die zu stark mit einer bereits offenen, gleichgerichteten Position korreliert (Diversifikation). Bei fehlenden Daten wird normal weitergehandelt.',
+    lbl_adx_filter:'ADX-Trendfilter', lbl_min_adx:'Min. ADX (10-40)',
+    note_adx:'ADX-Trendfilter: daempft das Signal, wenn kein klarer Trend da ist (ADX unter Schwelle) – handelt weniger im Seitwaerts-Gezappel. Fail-open bei zu wenig Daten.',
+    lbl_ob:'Order-Book-Kaufdruck',
+    note_ob:'Order-Book-Kaufdruck: bezieht den Kauf-/Verkaufsdruck aus dem Live-Orderbuch als zusaetzlichen Signal-Faktor mit ein. Fail-open, wenn keine Daten verfuegbar sind.',
+    lbl_sig_thresh:'Signal-Schwelle (2-5)',
+    grid_oneway_warn:'<b>WICHTIG:</b> Bitget Sub-Account muss auf <b>One-Way Mode</b> stehen!<br>Bitget App: Futures-Handel -> Einstellungen -> Positionsmodus -> One-Way Mode.<br>Im Hedge-Modus oeffnet der Grid Bot ungewollt gegenlaeutige Positionen.',
+    lbl_price_up:'Preis oben (0 = auto)', lbl_price_low:'Preis unten (0 = auto)', lbl_levels:'Anzahl Levels',
+    lbl_min_funding:'Min. Funding Rate (%)', lbl_max_pos:'Max. Position (USDT)',
+    dca_spot_note:'DCA kauft immer auf dem Spot-Markt (kein Hebel, keine Funding-Kosten). Das Guthaben muss auf dem Spot-Konto des Sub-Accounts liegen.',
+    lbl_interval:'Interval (Stunden)', lbl_amount_buy:'Betrag pro Kauf (USDT)',
+    dca_conn_note:'Verbindungstest zeigt Spot-Balance (genutztes Kapital) und Futures-Balance getrennt.<br>Tipp: Fuer DCA nur Spot-Guthaben aufbuchen, Futures-Konto leer lassen.',
     // Market
     markt_title:'MARKT-UEBERSICHT', symbol:'Symbol', price:'Preis',
     change24:'24h %', high24:'24h Hoch', low24:'24h Tief',
@@ -3523,6 +3586,26 @@ const STRINGS = {
     panic:'ALL STOP & CLOSE',
     balance:'Balance', total_balance:'Total Balance',
     total_pnl:'Total PnL', active_bots:'Active Bots',
+    total_pnl_nofund:'Total PnL (excl. Funding)', running_total:'Running / Total',
+    all_bots:'All bots', th_action:'Action', no_finnhub:'No Finnhub key set',
+    pos_side:'Side', pos_size:'Size', pos_entry:'Entry', pos_lev:'Leverage',
+    pnl_history:'PnL history', no_blackout:'No blackout', grid_profits:'Grid profits',
+    th_price:'Price', th_high24:'24h High', th_low24:'24h Low', th_vol_m:'Volume (M$)',
+    loading:'Loading...', loading_market:'Loading market data...', click_load:'Click "Load".',
+    th_time:'Time', th_qty:'Size', th_fee:'Fee',
+    kal_time:'Time (UTC)', kal_country:'Country', kal_event:'Event', kal_actual:'Actual', kal_forecast:'Forecast',
+    loading_cal:'Loading calendar... (Finnhub API key required in Settings)',
+    over_thresh:'Above threshold', strategy:'Strategy',
+    bt_fees_total:'Total fees', bt_entry:'Entry', bt_exit:'Exit', bt_res:'Res.', bt_final:'Final equity', bt_fees:'Fees',
+    alert_value:'Value / threshold', active_alerts:'Active alerts', last_triggers:'Last triggers',
+    executed:'Executed', cur_streak:'current', usdt_funding:'USDT Funding',
+    filled_levels:'Filled levels', usdt_total:'USDT total', funding_cum:'Cumulative funding earned',
+    econ_cal:'ECONOMIC CALENDAR', reload:'Reload', filter_all:'ALL',
+    us_blackout:'US BLACKOUT ACTIVE - Signal Bot opens no new positions',
+    meta_signal:'RSI · EMA · MACD · Funding · Macro | 3x leverage',
+    meta_grid:'Automated buy/sell levels in a price grid',
+    meta_funding:'Monitoring mode: shows funding-rate opportunities but places NO real orders. "Earned" is an estimate.',
+    meta_dca:'Time-based buying with dollar-cost averaging',
     total_trades:'Total Trades', pnl:'PnL', trades:'Trades',
     macro:'Macro', invested:'Invested', next_buy:'Next Buy',
     earned:'Earned (est.)', opportunities:'Opportunities',
@@ -3553,6 +3636,38 @@ const STRINGS = {
     settings_save:'SAVE SETTINGS',
     settings_note:'Important: Always click SAVE after entering values, then START.',
     mode_demo:'DEMO MODE', mode_live:'LIVE MODE',
+    saved_msg:'Saved.',
+    confirm_live:'ACTIVATE LIVE MODE? Real orders with real money. Restart all running bots afterwards!',
+    mode_demo_active:'DEMO MODE active', mode_live_active:'LIVE MODE active',
+    set_head:'SETTINGS',
+    set_mode_head:'Trading mode',
+    set_mode_hint:'Demo = paptrading:1 (no real money). Live = real orders on Bitget.',
+    set_mode_warn:'⚠️ After switching, restart all running bots so the new mode takes effect.',
+    set_presets_head:'Strategy presets',
+    set_presets_hint:'Presets auto-fill the Signal and Grid bot fields. Then just enter your API keys.',
+    set_auth_head:'Dashboard access',
+    set_auth_hint:'A random password was generated on first start (see platform.log). Change it here and remember to SAVE — the browser will then ask for the new login on next load.',
+    lbl_user:'Username', lbl_pass:'Password', ph_pass_unchanged:'Leave empty = unchanged',
+    set_global_head:'Global API keys',
+    set_global_hint:'Important: Always click SAVE below after entering keys, then press START.',
+    ph_finnhub:'For the macro calendar (free)', ph_coinalyze:'For the Derivatives tab (free, coinalyze.net)',
+    ph_tg_chat:'Your chat ID (e.g. 123456789)',
+    set_notify_note:'Telegram: @BotFather → /newbot → token. Chat ID from @userinfobot.<br>Discord: Server settings → Integrations → Webhooks → copy URL.<br>Both can be active at once. News sentiment: CoinGecko (free, no key).',
+    set_preset:'Preset:', bp_cons:'CONSERVATIVE', bp_std:'STANDARD', bp_agg:'AGGRESSIVE',
+    lbl_risk_trade:'Risk per trade (%)', lbl_usdt_trade:'USDT per trade (fallback)',
+    lbl_max_conc:'Max simultaneous pos.', lbl_corr_filter:'Correlation filter', lbl_max_corr:'Max correlation (0.5-1.0)',
+    note_corr:'Correlation filter: prevents the bot from opening a new position that is too strongly correlated with an already-open one in the same direction (diversification). When data is missing it keeps trading as normal.',
+    lbl_adx_filter:'ADX trend filter', lbl_min_adx:'Min ADX (10-40)',
+    note_adx:'ADX trend filter: dampens the signal when there is no clear trend (ADX below threshold) – trades less in sideways chop. Fail-open when there is too little data.',
+    lbl_ob:'Order-book buy pressure',
+    note_ob:'Order-book buy pressure: includes buy/sell pressure from the live order book as an extra signal factor. Fail-open when no data is available.',
+    lbl_sig_thresh:'Signal threshold (2-5)',
+    grid_oneway_warn:'<b>IMPORTANT:</b> the Bitget sub-account must be set to <b>One-Way Mode</b>!<br>Bitget app: Futures trading -> Settings -> Position mode -> One-Way Mode.<br>In Hedge mode the Grid Bot unintentionally opens opposing positions.',
+    lbl_price_up:'Upper price (0 = auto)', lbl_price_low:'Lower price (0 = auto)', lbl_levels:'Number of levels',
+    lbl_min_funding:'Min funding rate (%)', lbl_max_pos:'Max position (USDT)',
+    dca_spot_note:'DCA always buys on the spot market (no leverage, no funding costs). The balance must sit on the sub-account\'s spot account.',
+    lbl_interval:'Interval (hours)', lbl_amount_buy:'Amount per buy (USDT)',
+    dca_conn_note:'The connection test shows spot balance (capital used) and futures balance separately.<br>Tip: for DCA only fund the spot balance, leave the futures account empty.',
     markt_title:'MARKET OVERVIEW', symbol:'Symbol', price:'Price',
     change24:'24h %', high24:'24h High', low24:'24h Low',
     funding:'Funding', volume:'Volume (M $)',
@@ -3715,8 +3830,13 @@ function applyLang() {
   // All elements with data-i18n (including <option> which needs .text)
   document.querySelectorAll('[data-i18n]').forEach(el => {
     const val = t(el.dataset.i18n);
-    if (el.tagName === 'OPTION') el.text = val;
-    else el.textContent = val;
+    if (el.tagName === 'OPTION')       el.text = val;
+    else if (val.indexOf('<') >= 0)    el.innerHTML = val;   // Strings mit <br>/<b> (statische UI-Texte)
+    else                               el.textContent = val;
+  });
+  // Placeholder-Uebersetzungen (data-i18n-ph)
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => {
+    el.setAttribute('placeholder', t(el.dataset.i18nPh));
   });
   // Buttons
   document.querySelectorAll('.btn-validate').forEach(btn => btn.textContent = t('test_conn'));
@@ -3806,16 +3926,16 @@ async function triggerPanic() {
 function onLiveModeChange(isLive) {
   const label = document.getElementById('mode-label');
   if (isLive) {
-    const ok = confirm('LIVE-MODUS AKTIVIEREN? Echte Orders mit echtem Geld. Alle laufenden Bots danach neu starten!');
+    const ok = confirm(t('confirm_live'));
     if (!ok) {
       document.getElementById('cfg-live').checked = false;
       return;
     }
-    label.textContent = 'LIVE-MODUS aktiv';
+    label.textContent = t('mode_live_active');
     label.style.color = 'var(--red)';
     document.body.className = 'live-mode';
   } else {
-    label.textContent = 'DEMO-MODUS aktiv';
+    label.textContent = t('mode_demo_active');
     label.style.color = 'var(--grid)';
     document.body.className = 'demo-mode';
   }
@@ -5451,7 +5571,7 @@ function fillSettingsForm(state) {
     document.getElementById('cfg-live').checked = live;
     const label = document.getElementById('mode-label');
     if (label) {
-      label.textContent = live ? 'LIVE-MODUS aktiv' : 'DEMO-MODUS aktiv';
+      label.textContent = live ? t('mode_live_active') : t('mode_demo_active');
       label.style.color = live ? 'var(--red)' : 'var(--grid)';
     }
     const b = cfg.bots || {};
