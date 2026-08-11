@@ -151,6 +151,8 @@ DEFAULT_CONFIG = {
             "atr_sl_mult": 1.5, "atr_tp_mult": 2.5,
             "max_concurrent": 2,
             "use_correlation_filter": True, "max_correlation": 0.85,
+            "use_adx_filter": True, "min_adx": 20,
+            "use_orderbook_signal": True,
             "signal_threshold": 3, "check_interval": 30,
         },
         "grid": {
@@ -502,6 +504,44 @@ def vol_ratio(volumes, period=20):
     if len(volumes) < period+1: return 1.0
     avg = sum(volumes[-period-1:-1]) / period
     return volumes[-1] / avg if avg > 0 else 1.0
+
+def adx(highs, lows, closes, period=14):
+    """Average Directional Index (Wilder) – Trendstaerke 0..100.
+    >25 = klarer Trend, <20 = Seitwaerts/Gezappel. Bei zu wenig Daten -> 0.0 (unbekannt)."""
+    n = len(closes)
+    if n < period * 2 + 1:
+        return 0.0
+    plus_dm, minus_dm, trs = [], [], []
+    for i in range(1, n):
+        up = highs[i] - highs[i-1]
+        dn = lows[i-1] - lows[i]
+        plus_dm.append(up if (up > dn and up > 0) else 0.0)
+        minus_dm.append(dn if (dn > up and dn > 0) else 0.0)
+        trs.append(max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])))
+    def _wilder(vals):
+        if len(vals) < period: return []
+        s = sum(vals[:period]); out = [s]
+        for v in vals[period:]:
+            s = s - s/period + v; out.append(s)
+        return out
+    atr_s, pdm_s, mdm_s = _wilder(trs), _wilder(plus_dm), _wilder(minus_dm)
+    if not atr_s:
+        return 0.0
+    dxs = []
+    for i in range(len(atr_s)):
+        a = atr_s[i]
+        if a <= 0:
+            dxs.append(0.0); continue
+        pdi = 100 * pdm_s[i] / a
+        mdi = 100 * mdm_s[i] / a
+        tot = pdi + mdi
+        dxs.append(100 * abs(pdi - mdi) / tot if tot > 0 else 0.0)
+    if len(dxs) < period:
+        return round(sum(dxs)/len(dxs), 1) if dxs else 0.0
+    val = sum(dxs[:period]) / period
+    for dx in dxs[period:]:
+        val = (val * (period-1) + dx) / period
+    return round(val, 1)
 
 # ─────────────────────────────────────────────
 #  GETEILTE DATEN (Fear&Greed, News, Makro)
@@ -877,6 +917,64 @@ def fetch_derivatives(bases=None):
     result = {"rows": rows}
     _deriv_cache.update({"data": result, "ts": time.time()})
     return result
+
+# ─────────────────────────────────────────────
+#  ORDER-BOOK-DRUCK (Kauf/Verkauf, Bitget public)
+# ─────────────────────────────────────────────
+_ob_cache = {}
+
+def fetch_orderbook_pressure(symbol, band=0.01):
+    """Kauf-/Verkaufsdruck aus dem oeffentlichen Bitget-Orderbuch.
+    ratio = Bid-Notional / Ask-Notional innerhalb +-band (Standard 1%) um den Mittelpreis.
+    >1 = mehr Kaufdruck, <1 = mehr Verkaufsdruck. Fail-safe: bei Fehler -> None."""
+    c = _ob_cache.get(symbol)
+    if c and time.time() - c["ts"] < 15:
+        return c["data"]
+    try:
+        r = requests.get(f"{BASE_URL}/api/v2/mix/market/merge-depth",
+                         params={"symbol": symbol, "productType": PRODUCT_TYPE, "limit": "100"},
+                         timeout=8)
+        d = r.json().get("data", {})
+        bids, asks = d.get("bids", []), d.get("asks", [])
+        if not bids or not asks:
+            return None
+        best_bid, best_ask = float(bids[0][0]), float(asks[0][0])
+        mid = (best_bid + best_ask) / 2
+        if mid <= 0:
+            return None
+        lo, hi = mid * (1 - band), mid * (1 + band)
+        bid_vol = sum(float(p) * float(s) for p, s in ((b[0], b[1]) for b in bids) if float(p) >= lo)
+        ask_vol = sum(float(p) * float(s) for p, s in ((a[0], a[1]) for a in asks) if float(p) <= hi)
+        ratio = round(bid_vol / ask_vol, 2) if ask_vol > 0 else None
+        out = {
+            "ratio":      ratio,
+            "bid_vol":    round(bid_vol, 0),
+            "ask_vol":    round(ask_vol, 0),
+            "spread_bps": round((best_ask - best_bid) / mid * 10000, 1),
+        }
+        _ob_cache[symbol] = {"ts": time.time(), "data": out}
+        return out
+    except Exception:
+        return None
+
+def fetch_orderbook_all(bases=None):
+    """Order-Book-Druck fuer mehrere Coins (fuer das Dashboard-Panel)."""
+    if not bases:
+        cfg   = load_config()
+        toks  = cfg.get("bots", {}).get("signal", {}).get("tokens", [])
+        bases = ["BTC", "ETH"] + [str(t).replace("USDT", "") for t in toks]
+    seen = set()
+    bases = [b for b in bases if b and not (b in seen or seen.add(b))][:12]
+    rows = []
+    for b in bases:
+        ob = fetch_orderbook_pressure(f"{b}USDT")
+        rows.append({"coin": b,
+                     "ratio":      (ob or {}).get("ratio"),
+                     "bid_vol":    (ob or {}).get("bid_vol"),
+                     "ask_vol":    (ob or {}).get("ask_vol"),
+                     "spread_bps": (ob or {}).get("spread_bps")})
+        time.sleep(0.05)
+    return {"rows": rows}
 
 # ─────────────────────────────────────────────
 #  TRADE-HISTORIE (alle Sub-Accounts)
@@ -1374,6 +1472,9 @@ def run_signal(flag):
     max_conc     = bc.get("max_concurrent", 2)
     use_corr_filter = bc.get("use_correlation_filter", True)
     max_corr     = float(bc.get("max_correlation", 0.85))
+    use_adx      = bc.get("use_adx_filter", True)
+    min_adx      = float(bc.get("min_adx", 20))
+    use_ob       = bc.get("use_orderbook_signal", True)
     thresh       = bc.get("signal_threshold", 3)
     check        = bc.get("check_interval", 30)
     fkey         = cfg.get("finnhub_key","")
@@ -1386,7 +1487,7 @@ def run_signal(flag):
             pstate["bots"]["signal"]["tokens"][t] = {
                 "signal":"NEUTRAL","score":0,"rsi":0,"ema_fast":0,"ema_slow":0,
                 "macd":0,"macd_signal":0,"volume_ratio":1,"funding_rate":0,
-                "bb_upper":0,"bb_lower":0,"atr":0,
+                "bb_upper":0,"bb_lower":0,"atr":0,"adx":0,"ob_ratio":None,
                 "fear_greed":50,"sentiment":"neutral","position":None,
             }
         pstate["bots"]["signal"]["win_streak"]  = 0
@@ -1491,6 +1592,21 @@ def run_signal(flag):
                     sc += max(-1, min(1, mscore))
                     sc += max(-2, min(0, ssoft))
 
+                    # Order-Book-Kaufdruck als zusaetzlicher Faktor (fail-open)
+                    ob_ratio = None
+                    if use_ob:
+                        ob = fetch_orderbook_pressure(sym)
+                        if ob and ob.get("ratio"):
+                            ob_ratio = ob["ratio"]
+                            if   ob_ratio >= 1.3:  sc += 1   # klarer Kaufdruck
+                            elif ob_ratio <= 0.77: sc -= 1   # klarer Verkaufsdruck
+
+                    # ADX-Trendfilter: bei schwachem Trend Signal daempfen (kein Handel im Gezappel).
+                    # Fail-open: ADX==0 (zu wenig Daten) -> keine Daempfung.
+                    adx_val = adx(highs, lows, closes, 14)
+                    if use_adx and 0 < adx_val < min_adx:
+                        sc = int(sc * 0.5)
+
                     sig = "LONG" if sc >= thresh else "SHORT" if sc <= -thresh else "NEUTRAL"
                     with plock:
                         pstate["bots"]["signal"]["tokens"][sym].update({
@@ -1499,10 +1615,11 @@ def run_signal(flag):
                             "macd":round(ml,6),"macd_signal":round(ms,6),
                             "volume_ratio":round(vr,2),"funding_rate":round(fr,6),
                             "bb_upper":round(bb_u,4),"bb_lower":round(bb_l,4),
-                            "atr":round(atr_val,4),
+                            "atr":round(atr_val,4),"adx":round(adx_val,1),
+                            "ob_ratio":ob_ratio,
                             "fear_greed":fg,"sentiment":sent,
                         })
-                    blog("signal",f"{cur}: RSI={rv:.1f} ATR={atr_val:.3f} BB={'low' if price_now<bb_l else 'high' if price_now>bb_u else 'mid'} Score={sc:+d} -> {sig}")
+                    blog("signal",f"{cur}: RSI={rv:.1f} ADX={adx_val:.0f} OB={ob_ratio if ob_ratio else '-'} BB={'low' if price_now<bb_l else 'high' if price_now>bb_u else 'mid'} Score={sc:+d} -> {sig}")
 
                     pos = client.position(sym)
                     with plock:
@@ -2958,6 +3075,25 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
     </div>
     <div id="deriv-rows"></div>
   </div>
+
+  <!-- Order-Book-Druck (Bitget public) -->
+  <div style="display:flex;justify-content:space-between;align-items:center;margin:22px 0 10px">
+    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="ob_title">ORDER-BOOK-DRUCK (BITGET)</span>
+  </div>
+  <div style="font-size:10px;color:var(--muted);margin-bottom:12px;line-height:1.5" data-i18n="ob_hint">
+    Kauf-/Verkaufsdruck aus dem Live-Orderbuch: Verhaeltnis von Kauf- zu Verkaufsvolumen im Bereich &plusmn;1 % um den Preis. &gt;1 (gruen) = Kaufdruck ueberwiegt, &lt;1 (rot) = Verkaufsdruck. Kurzfristig und kann durch Fake-Walls verzerrt sein.
+  </div>
+  <div id="ob-status" style="font-size:11px;color:var(--muted);padding:16px;text-align:center">Lade...</div>
+  <div class="rate-table" id="ob-table-wrap" style="display:none">
+    <div class="ov-head" style="grid-template-columns:70px 1fr 110px 110px 90px">
+      <span data-i18n="deriv_coin">Coin</span>
+      <span data-i18n="ob_pressure">Druck (Bid/Ask)</span>
+      <span data-i18n="ob_bidvol">Kaufvol.</span>
+      <span data-i18n="ob_askvol">Verkaufsvol.</span>
+      <span data-i18n="ob_spread">Spread</span>
+    </div>
+    <div id="ob-rows"></div>
+  </div>
 </div>
 
 <!-- ALERTS -->
@@ -3123,6 +3259,11 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label>Korrelations-Filter</label><input type="checkbox" id="sig-corr-filter" style="width:auto"></div>
         <div class="field-row"><label>Max. Korrelation (0.5-1.0)</label><input type="number" id="sig-max-corr" placeholder="0.85" step="0.05" min="0.5" max="1.0"></div>
         <div class="settings-note">Korrelations-Filter: verhindert, dass der Bot eine neue Position eroeffnet, die zu stark mit einer bereits offenen, gleichgerichteten Position korreliert (Diversifikation). Bei fehlenden Daten wird normal weitergehandelt.</div>
+        <div class="field-row"><label>ADX-Trendfilter</label><input type="checkbox" id="sig-adx-filter" style="width:auto"></div>
+        <div class="field-row"><label>Min. ADX (10-40)</label><input type="number" id="sig-min-adx" placeholder="20" step="1" min="10" max="40"></div>
+        <div class="settings-note">ADX-Trendfilter: daempft das Signal, wenn kein klarer Trend da ist (ADX unter Schwelle) – handelt weniger im Seitwaerts-Gezappel. Fail-open bei zu wenig Daten.</div>
+        <div class="field-row"><label>Order-Book-Kaufdruck</label><input type="checkbox" id="sig-ob-signal" style="width:auto"></div>
+        <div class="settings-note">Order-Book-Kaufdruck: bezieht den Kauf-/Verkaufsdruck aus dem Live-Orderbuch als zusaetzlichen Signal-Faktor mit ein. Fail-open, wenn keine Daten verfuegbar sind.</div>
         <div class="field-row"><label>Signal-Schwelle (2-5)</label><input type="number" id="sig-thresh" placeholder="3" min="2" max="5"></div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('signal')">Verbindung testen</button>
@@ -3291,6 +3432,9 @@ const STRINGS = {
     deriv_title:'DERIVATE-DATEN (COINALYZE)',
     deriv_hint:'Aggregierte Futures-Daten (Binance-Perps): Open Interest, Funding Rate, Long/Short-Verhaeltnis und Liquidationen der letzten 24h. Braucht einen kostenlosen Coinalyze-API-Key (Settings → Globale API-Keys).',
     deriv_coin:'Coin', deriv_oi:'Open Interest', deriv_funding:'Funding', deriv_ls:'Long/Short', deriv_liq:'Liq. 24h (L/S)',
+    ob_title:'ORDER-BOOK-DRUCK (BITGET)',
+    ob_hint:'Kauf-/Verkaufsdruck aus dem Live-Orderbuch: Verhaeltnis von Kauf- zu Verkaufsvolumen im Bereich ±1 % um den Preis. >1 (gruen) = Kaufdruck ueberwiegt, <1 (rot) = Verkaufsdruck. Kurzfristig und kann durch Fake-Walls verzerrt sein.',
+    ob_pressure:'Druck (Bid/Ask)', ob_bidvol:'Kaufvol.', ob_askvol:'Verkaufsvol.', ob_spread:'Spread',
     // Status
     running:'RUNNING', stopped:'STOPPED', starting:'STARTING',
     paused:'PAUSIERT', stopping:'STOPPING',
@@ -3369,6 +3513,9 @@ const STRINGS = {
     deriv_title:'DERIVATIVES DATA (COINALYZE)',
     deriv_hint:'Aggregated futures data (Binance perps): open interest, funding rate, long/short ratio and liquidations over the last 24h. Requires a free Coinalyze API key (Settings → Global API keys).',
     deriv_coin:'Coin', deriv_oi:'Open Interest', deriv_funding:'Funding', deriv_ls:'Long/Short', deriv_liq:'Liq. 24h (L/S)',
+    ob_title:'ORDER-BOOK PRESSURE (BITGET)',
+    ob_hint:'Buy/sell pressure from the live order book: ratio of buy to sell volume within ±1% of price. >1 (green) = buy pressure dominates, <1 (red) = sell pressure. Short-term and can be distorted by fake walls.',
+    ob_pressure:'Pressure (Bid/Ask)', ob_bidvol:'Buy vol.', ob_askvol:'Sell vol.', ob_spread:'Spread',
     running:'RUNNING', stopped:'STOPPED', starting:'STARTING',
     paused:'PAUSED', stopping:'STOPPING',
     start:'START', stop:'STOP', save:'SAVE SETTINGS',
@@ -4229,6 +4376,45 @@ function renderCorrelation(d) {
 async function loadDerivate() {
   loadRegime();
   loadDerivatives();
+  loadOrderbook();
+}
+
+function obColor(r) {
+  if (r == null) return '#888';
+  if (r >= 1.3)  return 'var(--signal)';
+  if (r <= 0.77) return 'var(--red)';
+  if (r >= 1.05) return '#7fd8b0';
+  if (r <= 0.95) return '#e59aa0';
+  return '#888';
+}
+
+async function loadOrderbook() {
+  const status = document.getElementById('ob-status');
+  const wrap   = document.getElementById('ob-table-wrap');
+  status.style.display = 'block'; wrap.style.display = 'none';
+  status.textContent = (_lang==='en'?'Loading…':'Lade…');
+  try {
+    const r = await fetch('/api/orderbook');
+    const d = await r.json();
+    const rows = (d.rows||[]).filter(x => x.ratio != null);
+    if (!rows.length) { status.textContent = (_lang==='en'?'No data.':'Keine Daten.'); return; }
+    document.getElementById('ob-rows').innerHTML = (d.rows||[]).map(x => {
+      const col = obColor(x.ratio);
+      const bar = x.ratio==null ? '' :
+        '<span style="display:inline-block;height:6px;width:'+Math.min(100,Math.max(6,x.ratio*40))+'px;background:'+col+';border-radius:3px;margin-left:8px;vertical-align:middle"></span>';
+      return '<div class="ov-row" style="grid-template-columns:70px 1fr 110px 110px 90px">' +
+        '<span style="font-weight:600;color:var(--white)">'+esc(x.coin)+'</span>' +
+        '<span style="color:'+col+';font-weight:600">'+(x.ratio==null?'–':x.ratio)+bar+'</span>' +
+        '<span class="green">'+fmtUsdShort(x.bid_vol)+'</span>' +
+        '<span class="red">'+fmtUsdShort(x.ask_vol)+'</span>' +
+        '<span style="font-size:10px;color:var(--muted)">'+(x.spread_bps==null?'–':x.spread_bps+' bps')+'</span>' +
+      '</div>';
+    }).join('');
+    status.style.display = 'none';
+    wrap.style.display = 'block';
+  } catch(e) {
+    status.textContent = 'Fehler: ' + e.message;
+  }
 }
 
 async function loadRegime() {
@@ -5023,6 +5209,8 @@ function renderTokenCard(sym, d) {
     <div class="ind"><span>RSI</span><span>${parseFloat(d.rsi||0).toFixed(1)}</span></div>
     <div class="ind"><span>MACD</span><span style="color:${(d.macd||0)>(d.macd_signal||0)?'var(--signal)':'var(--red)'}">${(d.macd||0)>(d.macd_signal||0)?'Bull':'Bear'}</span></div>
     <div class="ind"><span>Volumen</span><span style="color:${volColor}">${parseFloat(d.volume_ratio||1).toFixed(1)}x</span></div>
+    <div class="ind"><span>ADX</span><span style="color:${(d.adx||0)>=25?'var(--signal)':(d.adx||0)>0&&(d.adx||0)<20?'var(--red)':'#888'}">${d.adx==null?'–':parseFloat(d.adx||0).toFixed(0)}</span></div>
+    <div class="ind"><span>Kaufdruck</span><span style="color:${d.ob_ratio==null?'#888':(d.ob_ratio>=1.1?'var(--signal)':d.ob_ratio<=0.9?'var(--red)':'#888')}">${d.ob_ratio==null?'–':parseFloat(d.ob_ratio).toFixed(2)}</span></div>
     <div class="ind"><span>Funding</span><span style="color:${frColor}">${(parseFloat(d.funding_rate||0)*100).toFixed(4)}%</span></div>
     <div class="ind"><span>News</span><span style="color:${sentColor}">${d.sentiment||'neutral'}</span></div>
     ${posHtml}
@@ -5274,6 +5462,9 @@ function fillSettingsForm(state) {
     document.getElementById('sig-max-conc').value    = s(b.signal?.max_concurrent||2);
     document.getElementById('sig-corr-filter').checked = (b.signal?.use_correlation_filter !== false);
     document.getElementById('sig-max-corr').value    = s(b.signal?.max_correlation ?? 0.85);
+    document.getElementById('sig-adx-filter').checked = (b.signal?.use_adx_filter !== false);
+    document.getElementById('sig-min-adx').value     = s(b.signal?.min_adx ?? 20);
+    document.getElementById('sig-ob-signal').checked = (b.signal?.use_orderbook_signal !== false);
     document.getElementById('sig-thresh').value = s(b.signal?.signal_threshold||3);
     document.getElementById('grd-key').value   = s(b.grid?.api_key);
     document.getElementById('grd-sym').value   = s(b.grid?.symbol||'BTCUSDT');
@@ -5316,6 +5507,9 @@ async function saveSettings() {
         max_concurrent:   int('sig-max-conc') || 2,
         use_correlation_filter: document.getElementById('sig-corr-filter')?.checked ?? true,
         max_correlation:  num('sig-max-corr') || 0.85,
+        use_adx_filter:   document.getElementById('sig-adx-filter')?.checked ?? true,
+        min_adx:          int('sig-min-adx') || 20,
+        use_orderbook_signal: document.getElementById('sig-ob-signal')?.checked ?? true,
         signal_threshold: int('sig-thresh')   || 3,
       },
       grid: {
@@ -5453,6 +5647,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(fetch_coingecko_regime())
         elif self.path == "/api/derivatives":
             self._json(fetch_derivatives())
+        elif self.path == "/api/orderbook":
+            self._json(fetch_orderbook_all())
         elif self.path == "/api/alert_log":
             with _alert_lock:
                 self._json(list(_alert_log))

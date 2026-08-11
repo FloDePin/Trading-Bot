@@ -45,7 +45,9 @@ Runs up to 4 automated trading bots simultaneously, each on its own Bitget sub-a
 ## Features
 
 ### Bots
-- Signal Bot: Wilder RSI, EMA cross (8/20), MACD, Bollinger Bands, Volume Ratio, Funding Rate, Fear & Greed, CoinGecko news sentiment, macro blackout
+- Signal Bot: Wilder RSI, EMA cross (8/20), MACD, Bollinger Bands, Volume Ratio, ADX (trend strength), order-book buy pressure, Funding Rate, Fear & Greed, CoinGecko news sentiment, macro blackout
+- ADX trend filter: dampens the signal when there is no clear trend (less trading in sideways chop); toggleable, fail-open
+- Order-book buy pressure as a signal factor: buy/sell pressure from the live order book feeds into the score; toggleable, fail-open
 - ATR-based dynamic stop loss and take profit
 - Position sizing as % of balance
 - Correlation check: max N simultaneous positions
@@ -69,6 +71,7 @@ Runs up to 4 automated trading bots simultaneously, each on its own Bitget sub-a
 - Correlation Matrix as a heatmap — correlation of the daily returns of your Signal Bot coins, so you can see at a glance whether your positions are truly diversified or all moving together
 - Trade Timing Analysis as a heatmap
 - Market regime & derivatives tab: BTC/ETH dominance, total market cap and trending coins (CoinGecko, free, no key) plus open interest, funding rate, long/short ratio and liquidations (Coinalyze, free API key required; degrades gracefully when no key is set)
+- Order-book pressure panel: live buy/sell pressure per coin from the Bitget order book (public, no key)
 - Alerts via Telegram and/or Discord
 - Bilingual: German / English
 
