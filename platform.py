@@ -554,7 +554,7 @@ _macro_cache = {"events":[], "ts":0, "blackout":False, "score":0, "soft_score":0
 _COINGECKO_IDS = {
     "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
     "XRP": "ripple",  "DOGE": "dogecoin", "ADA": "cardano",
-    "BNB": "binancecoin", "MATIC": "matic-network", "DOT": "polkadot",
+    "BNB": "binancecoin", "POL": "polygon-ecosystem-token", "DOT": "polkadot",
     "AVAX": "avalanche-2", "LINK": "chainlink", "LTC": "litecoin",
 }
 
@@ -661,7 +661,7 @@ def fetch_macro(finnhub_key):
 # ─────────────────────────────────────────────
 MARKET_SYMBOLS = ["BTCUSDT","ETHUSDT","SOLUSDT","XRPUSDT","DOGEUSDT",
                   "BNBUSDT","ADAUSDT","AVAXUSDT","DOTUSDT","LINKUSDT",
-                  "MATICUSDT","LTCUSDT","ATOMUSDT","NEARUSDT","AAVEUSDT"]
+                  "POLUSDT","LTCUSDT","ATOMUSDT","NEARUSDT","AAVEUSDT"]
 _market_cache  = {"data": [], "ts": 0}
 
 def fetch_market_overview():
