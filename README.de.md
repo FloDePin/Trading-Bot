@@ -1,10 +1,10 @@
 <div align="center">
 
-# 📈 Trading Platform v1
+# 📈 Trading Platform v1.1
 
 **Selbst gehostete Multi-Bot-Trading-Plattform für Bitget Futures & Spot, von FloDePin**
 
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org) [![Version](https://img.shields.io/badge/version-1.1-orange)](#changelog)
 
 🇬🇧 [English](README.md) | 🇩🇪 **Deutsch**
 
@@ -14,17 +14,45 @@
 
 ---
 
-## Was ist neu
+## Changelog
 
-Eine vollständige Sicherheits- und Korrektheitsüberprüfung (2026-07) hat mehrere Probleme behoben und die Plattform gehärtet:
+### v1.1 (2026-08)
 
-- **Dashboard-Login.** Das Dashboard und seine gesamte API verlangen jetzt einen Login (HTTP Basic Auth). Beim ersten interaktiven Start suchst du dir Benutzername/Passwort selbst in der Konsole aus; jeder folgende Start verlangt die Anmeldung erneut (3 Versuche) oder generiert ein Passwort für Headless‑Starts und protokolliert es einmalig in `platform.log`.
-- **Order-Sicherheit.** Orders tragen jetzt einen Idempotenz-Schlüssel (`clientOid`), sodass eine nach einem Netzwerk-Hänger wiederholte Anfrage dieselbe Order nicht mehr doppelt platzieren kann.
-- **Grid-Bot-Buchhaltung korrigiert.** Der Grid Bot verfolgt jetzt, was er tatsächlich gekauft hat, und schließt nur echte Positionen, statt bei jedem einzelnen Level eine neue zu eröffnen – die Exponierung bleibt begrenzt.
-- **Signal-Bot Win/Loss-Streak-Tracking korrigiert.** Ein toter Codepfad sorgte dafür, dass Win/Loss‑Streaks und die Trade‑Historie für per SL/TP geschlossene Positionen nie protokolliert wurden; das ist nun behoben.
-- **Funding Bot ist klar als reines Monitoring gekennzeichnet.** Er verfolgt Funding‑Rate‑Opportunities und schätzt den möglichen Ertrag, platziert aber keine echten Orders. Sein geschätzter PnL ist im Dashboard separat ausgewiesen.
-- **Robusterer Notfall‑Stopp.** Emergency Stop wiederholt jetzt einen fehlgeschlagenen Positions‑Close statt nach einem Versuch aufzugeben, und meldet dir namentlich, falls eine Position trotzdem nicht geschlossen werden konnte.
-- **Stored‑XSS‑Fixes** bei Alert‑Namen, Bot‑Logs und dem Wirtschaftskalender; Input‑Validierung/Grenzwerte in der API (Backtest‑Zeitraum, Hebel, Grid‑Größe), sodass fehlerhafte Anfragen einen sauberen Fehler zurückliefern.
+Ein großes Zuverlässigkeits- und Feature-Release, vor Veröffentlichung vollständig lokal getestet.
+
+**Trading-Logik-Fixes**
+- Die Ordergröße formatiert BTC/ETH-Mengen nicht mehr auf `"0"` herunter (was Orders ablehnte) — die Nachkommastellen kommen jetzt dynamisch aus der Mindestmenge des Marktes.
+- Grid Bot auf **Crossing-Logik** umgebaut: kauft beim Kreuzen eines Levels nach unten, verkauft (schließt) beim Kreuzen nach oben — kein endloses Nachkaufen mehr bei Oszillation um ein einzelnes Level.
+- **Notfall-Stopp** schließt/storniert jetzt auch jede Multi-Grid-Instanz auf ihrem **eigenen Sub-Account** (eigene API-Keys) und storniert nur die tatsächlich gehandelten Symbole (die alte ~250-Symbol-Schleife lief ins Rate-Limit und ließ den Panic scheitern).
+- **DCA-Bot-Stand** (investiert / Menge / Käufe / letzter Kauf) wird jetzt auf Platte persistiert — übersteht Neustarts und kauft nicht mehr bei jedem Start sofort.
+- **Order-Sanity-Check** vor jedem Einstieg (lehnt 0-Mengen / überdimensionierte Orders ab) und ein **SL/TP-Wächter**, der Stop-Loss/Take-Profit nachrüstet, falls die Börse sie nicht angehängt hat (inspiriert von einem MT5-Community-Bot).
+
+**Neue Signal-Werkzeuge**
+- **Korrelations-Matrix** + korrelationsbewusster Einstiegs-Filter (überspringt eine Position, die zu stark mit einer offenen korreliert).
+- **ADX-Trendfilter** und **Order-Book-Kauf-/Verkaufsdruck** als Signal-Faktoren.
+- **Markt-Regime (CoinGecko)** + **Derivate (Coinalyze)** Dashboard-Tab.
+- **Faktor-An/Aus-Tabelle** für den Signal-Bot + **Live-Score-Aufschlüsselung** pro Coin (du siehst genau, welcher Faktor was beiträgt), plus optionaler Langfrist-EMA-Trendfilter.
+
+**Realistischerer Backtest**
+- Trifft eine Kerze SL **und** TP, zählt das jetzt als **Verlust** (entfernt den optimistischen Look-Ahead-Bias).
+- Gebühren auf das **Notional statt auf den Profit** — die Trade-Historie sieht nicht mehr zu optimistisch aus.
+- **Konfigurierbare Positionsgröße %**, und der Multi-Symbol-Backtest berücksichtigt jetzt SL/TP aus dem UI.
+
+**UI / Aufräumen**
+- Settings als **zweispaltiges Layout** neu gestaltet; **vollständige Deutsch/Englisch-Abdeckung** über alle Tabs.
+- Delistetes **MATIC durch POL** ersetzt (Polygon-Umbenennung).
+- Thread-Safety-, XSS- und Gebühren-Buchhaltungs-Fixes; die Backtest-Hilfe weist jetzt darauf hin, dass der Volatilitäts-Circuit-Breaker nicht simuliert wird.
+
+### v1.0 (2026-07)
+
+Erste Härtung / Sicherheitsüberprüfung:
+
+- **Dashboard-Login.** Dashboard und gesamte API verlangen jetzt einen Login (HTTP Basic Auth). Erster interaktiver Start: eigenes Benutzername/Passwort in der Konsole; jeder weitere Start fragt erneut (3 Versuche) oder generiert bei Headless-Start ein Passwort in `platform.log`.
+- **Order-Sicherheit.** Orders tragen einen Idempotenz-Schlüssel (`clientOid`) gegen doppelte Orders nach Netzwerk-Hängern.
+- **Grid-Bot-Buchhaltung korrigiert.** Der Grid Bot verfolgt, was er gekauft hat, und schließt nur echte Positionen.
+- **Signal-Bot Win/Loss-Streak-Tracking korrigiert.** Ein toter Codepfad verhinderte das Protokollieren von Streaks und der Trade-Historie für SL/TP-Closes.
+- **Funding Bot klar als Monitoring gekennzeichnet.** Schätzt den Ertrag, platziert aber keine echten Orders; PnL separat ausgewiesen.
+- **Robusterer Notfall-Stopp**, plus **Stored-XSS-Fixes** und Input-Validierung in der API.
 
 ---
 
