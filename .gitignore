@@ -1,6 +1,7 @@
 # Sensitive data - NEVER commit these
 platform_config.json
 platform.db
+dca_state.json
 
 # Logs
 *.log

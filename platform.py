@@ -33,6 +33,7 @@ log = logging.getLogger("Platform")
 #  KONFIGURATION
 # ─────────────────────────────────────────────
 CONFIG_FILE    = "platform_config.json"
+DCA_STATE_FILE = "dca_state.json"
 DB_FILE        = "platform.db"
 DASHBOARD_PORT = 5000
 BASE_URL       = "https://api.bitget.com"
@@ -153,6 +154,10 @@ DEFAULT_CONFIG = {
             "use_correlation_filter": True, "max_correlation": 0.85,
             "use_adx_filter": True, "min_adx": 20,
             "use_orderbook_signal": True,
+            "use_sltp_guard": True,
+            "use_ema": True, "use_rsi": True, "use_macd": True, "use_bb": True,
+            "use_volume": True, "use_funding": True, "use_fg": True, "use_news": True,
+            "use_macro": True, "use_trend": False, "trend_len": 50,
             "signal_threshold": 3, "check_interval": 30,
         },
         "grid": {
@@ -272,6 +277,33 @@ def _verify_login_at_startup(cfg):
 def save_config(cfg):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
+
+def dca_load_state(symbol):
+    """Laedt den persistierten DCA-Stand (invested/qty/buys/last_buy) fuer ein Symbol.
+    So verliert der DCA-Bot nach Neustart/Absturz seine Statistik nicht - und kauft
+    NICHT sofort erneut (last_buy bleibt erhalten)."""
+    try:
+        if os.path.exists(DCA_STATE_FILE):
+            with open(DCA_STATE_FILE) as f:
+                s = json.load(f).get(symbol, {})
+            return (float(s.get("total_inv", 0)), float(s.get("total_qty", 0)),
+                    int(s.get("buy_count", 0)), float(s.get("last_buy", 0)))
+    except Exception as e:
+        log.debug(f"dca_load_state: {e}")
+    return 0.0, 0.0, 0, 0.0
+
+def dca_save_state(symbol, total_inv, total_qty, buy_count, last_buy):
+    try:
+        data = {}
+        if os.path.exists(DCA_STATE_FILE):
+            with open(DCA_STATE_FILE) as f:
+                data = json.load(f)
+        data[symbol] = {"total_inv": round(total_inv, 6), "total_qty": round(total_qty, 8),
+                        "buy_count": buy_count, "last_buy": last_buy}
+        with open(DCA_STATE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.debug(f"dca_save_state: {e}")
 
 # ─────────────────────────────────────────────
 #  BITGET API CLIENT
@@ -741,7 +773,8 @@ def compute_correlation(symbols=None, period_days=30):
         closes = _public_daily_closes(sym, period_days + 1)
         if len(closes) >= 4:
             rets = [math.log(closes[i] / closes[i-1])
-                    for i in range(1, len(closes)) if closes[i-1] > 0]
+                    for i in range(1, len(closes))
+                    if closes[i-1] > 0 and closes[i] > 0]   # closes[i]>0 verhindert math.log(0)-Crash
             returns[sym] = rets
             valid.append(sym)
         time.sleep(0.05)
@@ -1083,8 +1116,10 @@ def _sharpe(returns):
 
 def _run_backtest_on_candles(raw, leverage=3, threshold=2,
                               sl_pct=0.010, tp_pct=0.020,
-                              fee_rate=0.0004):
-    """Core Backtest-Logik auf einem Candle-Array."""
+                              fee_rate=0.0004, pos_frac=0.10):
+    """Core Backtest-Logik auf einem Candle-Array. pos_frac = Anteil des Kapitals
+    als Margin pro Trade (Standard 10%). Wichtig: bei gleichzeitigem SL+TP in einer
+    Kerze wird pessimistisch als SL gewertet (kein geschoenter Win)."""
     closes_all  = [float(c[4]) for c in raw]
     highs_all   = [float(c[2]) for c in raw]
     lows_all    = [float(c[3]) for c in raw]
@@ -1142,8 +1177,11 @@ def _run_backtest_on_candles(raw, leverage=3, threshold=2,
             hit_tp = max_gain >= tp_pct_actual
 
             if hit_sl or hit_tp:
-                gross   = equity * 0.1 * leverage * (tp_pct_actual if hit_tp else -sl_pct_actual)
-                fees    = equity * 0.1 * leverage * fee_rate * 2  # entry + exit
+                # Pessimistisch: trifft eine Kerze SL UND TP, laesst sich der Pfad nicht
+                # bestimmen -> als Stop-Loss werten (verhindert geschoente Win-Rate/Sharpe).
+                took_tp = hit_tp and not hit_sl
+                gross   = equity * pos_frac * leverage * (tp_pct_actual if took_tp else -sl_pct_actual)
+                fees    = equity * pos_frac * leverage * fee_rate * 2  # entry + exit
                 net_pnl = gross - fees
                 equity += net_pnl
                 equity_curve.append(round(equity, 2))
@@ -1154,7 +1192,7 @@ def _run_backtest_on_candles(raw, leverage=3, threshold=2,
                     "side":   position["side"],
                     "pnl":    round(net_pnl, 2),
                     "fee":    round(fees, 4),
-                    "result": "WIN" if hit_tp else "LOSS",
+                    "result": "WIN" if took_tp else "LOSS",
                 })
                 peak   = max(peak, equity)
                 max_dd = max(max_dd, (peak - equity) / peak * 100)
@@ -1181,7 +1219,7 @@ def _run_backtest_on_candles(raw, leverage=3, threshold=2,
 
 def run_backtest(symbol="BTCUSDT", period_days=14, leverage=3,
                  threshold=2, sl_pct=0.010, tp_pct=0.020,
-                 walk_forward=False):
+                 walk_forward=False, pos_frac=0.10):
     try:
         needed  = period_days * 24
         raw_all = []
@@ -1207,13 +1245,13 @@ def run_backtest(symbol="BTCUSDT", period_days=14, leverage=3,
         if walk_forward and len(raw) >= 100:
             split      = int(len(raw) * 0.7)
             test_raw   = raw[split:]
-            result     = _run_backtest_on_candles(test_raw, leverage, threshold, sl_pct, tp_pct)
+            result     = _run_backtest_on_candles(test_raw, leverage, threshold, sl_pct, tp_pct, pos_frac=pos_frac)
             result["walk_forward"] = True
             result["train_pct"]    = 70
             result["test_pct"]     = 30
             result["test_candles"] = len(test_raw)
         else:
-            result = _run_backtest_on_candles(raw, leverage, threshold, sl_pct, tp_pct)
+            result = _run_backtest_on_candles(raw, leverage, threshold, sl_pct, tp_pct, pos_frac=pos_frac)
             result["walk_forward"] = False
 
         result["symbol"]      = symbol
@@ -1224,11 +1262,11 @@ def run_backtest(symbol="BTCUSDT", period_days=14, leverage=3,
         return {"error": str(e)}
 
 def run_multi_backtest(symbols, period_days=14, leverage=3,
-                       threshold=2, sl_pct=0.010, tp_pct=0.020):
+                       threshold=2, sl_pct=0.010, tp_pct=0.020, pos_frac=0.10):
     """Backtest auf mehreren Symbolen gleichzeitig."""
     results = {}
     for sym in symbols:
-        results[sym] = run_backtest(sym, period_days, leverage, threshold, sl_pct, tp_pct)
+        results[sym] = run_backtest(sym, period_days, leverage, threshold, sl_pct, tp_pct, pos_frac=pos_frac)
     return results
 
 # ─────────────────────────────────────────────
@@ -1370,10 +1408,69 @@ TICK_DEC = {"SOLUSDT":3,"ETHUSDT":2,"XRPUSDT":4,"DOGEUSDT":5,"BTCUSDT":1}
 MIN_QTY  = {"SOLUSDT":0.1,"ETHUSDT":0.01,"XRPUSDT":1.0,"DOGEUSDT":1.0,"BTCUSDT":0.001}
 
 def fmt_p(sym, p): return f"{p:.{TICK_DEC.get(sym,3)}f}"
+
+def _qty_decimals(mq):
+    """Nachkommastellen aus der Mindestmenge ableiten (z.B. 0.001 -> 3, 0.01 -> 2, 1 -> 0)."""
+    s = ("%.10f" % mq).rstrip("0").rstrip(".")
+    return len(s.split(".")[1]) if "." in s else 0
+
 def fmt_q(sym, q):
     mq = MIN_QTY.get(sym, 0.1)
     if q < mq: q = mq
-    return str(int(q)) if sym in ("XRPUSDT","DOGEUSDT") else f"{q:.1f}"
+    # Nachkommastellen DYNAMISCH aus der Mindestmenge, nicht hart 1 Stelle:
+    # sonst wird z.B. 0.03 ETH oder 0.0015 BTC zu "0.0" -> Order von Bitget abgelehnt.
+    dec = _qty_decimals(mq)
+    return str(int(q)) if dec <= 0 else f"{q:.{dec}f}"
+
+def _size_check(qty_str, px, want_notional, tol=1.5):
+    """Order-Sanity-Check VOR dem Senden (Lehre vom MT5-Bot): faengt 0-Mengen
+    (Rundungs-/Formatierungsfehler) und stark ueberdimensionierte Orders ab.
+    Gibt (ok, grund) zurueck."""
+    try:
+        q = float(qty_str)
+    except Exception:
+        return False, "Menge nicht numerisch"
+    if q <= 0:
+        return False, "Menge 0 (Rundungs-/Formatierungsfehler)"
+    if want_notional > 0 and px > 0 and q * px > want_notional * tol:
+        return False, f"Notional {q*px:.2f} USDT > {tol}x Ziel {want_notional:.2f}"
+    return True, ""
+
+def _ensure_sltp(client, sym, direction, sl, tp, size):
+    """SL/TP-WAECHTER (Lehre vom MT5-Bot): prueft NACH dem Open, ob die Position
+    Stop-Loss UND Take-Profit hat. Fehlt etwas -> per TPSL-Order nachruesten
+    (idempotent: dasselbe SL/TP erneut zu setzen schadet nicht). Vollstaendig
+    fail-safe: bei Fehlern nur Log, nie Absturz, KEIN Auto-Close (vermeidet
+    Fehl-Schliessungen bei API-Eigenheiten)."""
+    cur = sym.replace("USDT", "")
+    try:
+        time.sleep(1)  # Bitget kurz Zeit geben, die Position zu registrieren
+        pos = client.position(sym)
+        if not pos:
+            return  # keine offene Position (z.B. IOC nicht gefuellt) -> nichts zu schuetzen
+        def _has(*keys):
+            return any(float(pos.get(k, 0) or 0) > 0 for k in keys)
+        has_sl = _has("presetStopLossPrice", "stopLoss", "slTriggerPrice")
+        has_tp = _has("presetStopSurplusPrice", "takeProfit", "tpTriggerPrice")
+        if has_sl and has_tp:
+            blog("signal", f"{cur}: SL/TP beim Broker bestaetigt", "INFO")
+            return
+        hold = "long" if direction == "LONG" else "short"
+        for plan, trig, missing in (("pos_loss", sl, not has_sl), ("pos_profit", tp, not has_tp)):
+            if not missing:
+                continue
+            r = client.post("/api/v2/mix/order/place-tpsl-order", {
+                "symbol": sym, "productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN,
+                "planType": plan, "triggerPrice": fmt_p(sym, trig),
+                "holdSide": hold, "size": str(size),
+            })
+            okp = r.get("code") == "00000"
+            blog("signal", f"{cur}: {plan} nachgeruestet @ {trig:.2f} {'OK' if okp else r.get('msg','FEHLER')}",
+                 "WARN" if okp else "ERROR")
+        if not has_sl:
+            notify(f"[!] {cur}: Position ohne Stop-Loss erkannt – Waechter hat nachgeruestet. Bitte pruefen.", True)
+    except Exception as e:
+        blog("signal", f"{cur}: SL/TP-Waechter Fehler (Position bleibt bestehen): {e}", "WARN")
 
 pstate = {
     "bots": {
@@ -1475,6 +1572,19 @@ def run_signal(flag):
     use_adx      = bc.get("use_adx_filter", True)
     min_adx      = float(bc.get("min_adx", 20))
     use_ob       = bc.get("use_orderbook_signal", True)
+    use_sltp_guard = bc.get("use_sltp_guard", True)
+    # Einzelne Score-Faktoren an/aus (Standard: alle bestehenden an, Trendfilter aus)
+    use_ema     = bc.get("use_ema", True)
+    use_rsi     = bc.get("use_rsi", True)
+    use_macd    = bc.get("use_macd", True)
+    use_bb      = bc.get("use_bb", True)
+    use_volume  = bc.get("use_volume", True)
+    use_funding = bc.get("use_funding", True)
+    use_fg      = bc.get("use_fg", True)
+    use_news    = bc.get("use_news", True)
+    use_macro   = bc.get("use_macro", True)
+    use_trend   = bc.get("use_trend", False)
+    trend_len   = max(20, int(bc.get("trend_len", 50)))
     thresh       = bc.get("signal_threshold", 3)
     check        = bc.get("check_interval", 30)
     fkey         = cfg.get("finnhub_key","")
@@ -1488,7 +1598,7 @@ def run_signal(flag):
                 "signal":"NEUTRAL","score":0,"rsi":0,"ema_fast":0,"ema_slow":0,
                 "macd":0,"macd_signal":0,"volume_ratio":1,"funding_rate":0,
                 "bb_upper":0,"bb_lower":0,"atr":0,"adx":0,"ob_ratio":None,
-                "fear_greed":50,"sentiment":"neutral","position":None,
+                "fear_greed":50,"sentiment":"neutral","position":None,"score_parts":{},
             }
         pstate["bots"]["signal"]["win_streak"]  = 0
         pstate["bots"]["signal"]["loss_streak"] = 0
@@ -1539,12 +1649,14 @@ def run_signal(flag):
             elif ssoft < 0:
                 blog("signal",f"Soft-Penalty: {ssoft:+d} (Non-US)","MACRO")
 
-            # Aktuell offene Positionen (Symbol + Richtung) fuer Limit- und Korrelations-Check
+            # Aktuell offene Positionen (Symbol + Richtung) fuer Limit- und Korrelations-Check.
+            # Lesezugriff auf die geteilte pstate-Struktur unter plock (Thread-Safety).
             open_positions = []
-            for s in tokens:
-                p = pstate["bots"]["signal"]["tokens"].get(s,{}).get("position")
-                if p:
-                    open_positions.append((s, "LONG" if p.get("holdSide")=="long" else "SHORT"))
+            with plock:
+                for s in tokens:
+                    p = pstate["bots"]["signal"]["tokens"].get(s,{}).get("position")
+                    if p:
+                        open_positions.append((s, "LONG" if p.get("holdSide")=="long" else "SHORT"))
             open_pos_count = len(open_positions)
 
             # Korrelations-Daten einmal pro Zyklus (5-Min-Cache). Fail-open: bei Fehler None.
@@ -1572,38 +1684,35 @@ def run_signal(flag):
                     cur      = sym.replace("USDT","")
                     sent     = news_sentiment(cur)
 
-                    sc = 0
-                    sc += 1 if ef > es else -1
-                    if rv < 38:   sc += 1
-                    elif rv > 62: sc -= 1
-                    sc += 1 if ml > ms else -1
-                    # Bollinger Bands: Preis nahe unterem Band = bullish, oberem = bearish
                     price_now = closes[-1]
-                    if price_now < bb_l:  sc += 1
-                    elif price_now > bb_u: sc -= 1
-                    if vr > 1.2:  sc += 1 if ef > es else -1
-                    elif vr < 0.7: sc = int(sc * 0.5)
-                    if fr > 0.0003: sc -= 1
-                    elif fr < -0.0003: sc += 1
-                    if fg < 30: sc += 1
-                    elif fg > 70: sc -= 1
-                    if sent == "bullish":  sc += 1
-                    elif sent == "bearish": sc -= 1
-                    sc += max(-1, min(1, mscore))
-                    sc += max(-2, min(0, ssoft))
-
-                    # Order-Book-Kaufdruck als zusaetzlicher Faktor (fail-open)
-                    ob_ratio = None
+                    ema_long  = ema(closes, trend_len) if use_trend else 0.0
+                    adx_val   = adx(highs, lows, closes, 14)
+                    ob_ratio  = None
                     if use_ob:
                         ob = fetch_orderbook_pressure(sym)
                         if ob and ob.get("ratio"):
                             ob_ratio = ob["ratio"]
-                            if   ob_ratio >= 1.3:  sc += 1   # klarer Kaufdruck
-                            elif ob_ratio <= 0.77: sc -= 1   # klarer Verkaufsdruck
 
-                    # ADX-Trendfilter: bei schwachem Trend Signal daempfen (kein Handel im Gezappel).
-                    # Fail-open: ADX==0 (zu wenig Daten) -> keine Daempfung.
-                    adx_val = adx(highs, lows, closes, 14)
+                    # Jeder Faktor einzeln per Settings abschaltbar. Beitrag 0 = aus/neutral.
+                    # So sieht man im Dashboard genau, WELCHER Faktor wie viel beitraegt.
+                    parts = {
+                        "ema":      (1 if ef > es else -1) if use_ema else 0,
+                        "rsi":      (1 if rv < 38 else -1 if rv > 62 else 0) if use_rsi else 0,
+                        "macd":     (1 if ml > ms else -1) if use_macd else 0,
+                        "bb":       (1 if price_now < bb_l else -1 if price_now > bb_u else 0) if use_bb else 0,
+                        "volume":   ((1 if ef > es else -1) if vr > 1.2 else 0) if use_volume else 0,
+                        "funding":  (-1 if fr > 0.0003 else 1 if fr < -0.0003 else 0) if use_funding else 0,
+                        "fear_greed": (1 if fg < 30 else -1 if fg > 70 else 0) if use_fg else 0,
+                        "news":     (1 if sent == "bullish" else -1 if sent == "bearish" else 0) if use_news else 0,
+                        "orderbook": (1 if (ob_ratio and ob_ratio >= 1.3) else -1 if (ob_ratio and ob_ratio <= 0.77) else 0) if use_ob else 0,
+                        "macro":    (max(-1, min(1, mscore)) + max(-2, min(0, ssoft))) if use_macro else 0,
+                        "trend":    (1 if price_now > ema_long else -1) if use_trend else 0,
+                    }
+                    sc = sum(parts.values())
+                    # Modifier (kein additiver Faktor): sehr niedriges Volumen daempft das Signal
+                    if use_volume and vr < 0.7:
+                        sc = int(sc * 0.5)
+                    # ADX-Trendfilter: schwacher Trend -> Signal daempfen (fail-open bei ADX==0)
                     if use_adx and 0 < adx_val < min_adx:
                         sc = int(sc * 0.5)
 
@@ -1618,6 +1727,7 @@ def run_signal(flag):
                             "atr":round(atr_val,4),"adx":round(adx_val,1),
                             "ob_ratio":ob_ratio,
                             "fear_greed":fg,"sentiment":sent,
+                            "score_parts":{k:v for k,v in parts.items() if v != 0},
                         })
                     blog("signal",f"{cur}: RSI={rv:.1f} ADX={adx_val:.0f} OB={ob_ratio if ob_ratio else '-'} BB={'low' if price_now<bb_l else 'high' if price_now>bb_u else 'mid'} Score={sc:+d} -> {sig}")
 
@@ -1655,6 +1765,12 @@ def run_signal(flag):
                         px = client.price(sym)
                         if px <= 0: return
                         qs   = fmt_q(sym, (trade_usdt * lever) / px)
+                        # Order-Sanity-Check (Lehre vom MT5-Bot): keine 0-Menge, keine
+                        # stark ueberdimensionierte Order senden.
+                        ok_sz, why = _size_check(qs, px, trade_usdt * lever)
+                        if not ok_sz:
+                            blog("signal",f"{cur}: Order abgebrochen – {why} (Menge '{qs}')","ERROR")
+                            return
                         sl, tp = calc_sl_tp(px, direction)
                         resp = client.post("/api/v2/mix/order/place-order", {
                             "symbol":sym,"productType":PRODUCT_TYPE,
@@ -1672,6 +1788,9 @@ def run_signal(flag):
                             with plock:
                                 pstate["bots"]["signal"]["trade_count"] += 1
                             blog("signal",f"{cur}: {direction} @ {px:.2f} | SL={sl:.2f} TP={tp:.2f} ({trade_usdt:.0f} USDT)","TRADE")
+                            # SL/TP-Waechter: sicherstellen dass die Position wirklich geschuetzt ist
+                            if use_sltp_guard:
+                                _ensure_sltp(client, sym, direction, sl, tp, qs)
 
                     if pos:
                         ps = "LONG" if pos["holdSide"]=="long" else "SHORT"
@@ -1695,12 +1814,17 @@ def run_signal(flag):
                             ps    = "LONG" if prev_pos["holdSide"]=="long" else "SHORT"
                             entry = float(prev_pos.get("openPriceAvg",0))
                             upnl  = float(prev_pos.get("unrealizedPL",0))
-                            if upnl > 0:
+                            psize = float(prev_pos.get("total",0))
+                            # Fee aufs NOTIONAL (Entry+Exit), nicht auf den Profit -
+                            # sonst zieht die DB fast keine Gebuehren ab (zu optimistischer PnL).
+                            fee   = (entry + price_now) * psize * fee_rate
+                            net   = upnl - fee
+                            db_save_trade("signal", cur, ps, entry, round(price_now,4),
+                                          round(net,4), fee=round(fee,6), size=psize)
+                            if net > 0:
                                 win_streak += 1; loss_streak = 0
-                                db_save_trade("signal", cur, ps, entry, 0, upnl*(1-fee_rate))
                             else:
                                 loss_streak += 1; win_streak = 0
-                                db_save_trade("signal", cur, ps, entry, 0, upnl*(1+fee_rate))
                             with plock:
                                 pstate["bots"]["signal"].update({
                                     "win_streak":win_streak, "loss_streak":loss_streak})
@@ -1748,9 +1872,15 @@ def run_grid(flag):
     step    = (upper - lower) / n
     levels  = [lower + i * step for i in range(n + 1)]
     qty_lvl = (invest / n) / ((upper + lower) / 2)
-    filled  = [False] * (n + 1)
+    fee_rate = 0.0004  # Bitget Taker-Fee (Schaetzung fuer den PnL-Zaehler)
     pnl     = 0.0
-    net_qty = 0.0  # aktuell durch diesen Grid-Bot gehaltene Long-Menge (lokale Buchhaltung)
+    net_qty = 0.0     # aktuell gehaltene Long-Menge (lokale Buchhaltung)
+    held    = []      # Stack der Level-Indizes mit offenem Kauf (Anzeige + LIFO-Close)
+    trades  = 0
+    # Crossing-Logik: current_idx = zuletzt erreichtes Grid-Level. Gekauft wird beim
+    # Kreuzen NACH UNTEN, verkauft beim Kreuzen NACH OBEN. So wird pro Zelle nur einmal
+    # gehandelt - kein endloses Nachkaufen bei Oszillation um dasselbe Level.
+    current_idx = min(range(len(levels)), key=lambda i: abs(levels[i]-cur_price)) if cur_price > 0 else n // 2
 
     with plock:
         pstate["bots"]["grid"].update({
@@ -1765,57 +1895,69 @@ def run_grid(flag):
             px = client.price(sym)
             if px <= 0: time.sleep(check); continue
 
-            for i, level in enumerate(levels):
-                if abs(px - level) / level < 0.002 and not filled[i]:
-                    filled[i] = True
-                    side = "BUY" if px <= (upper+lower)/2 else "SELL"
-
-                    if side == "SELL" and net_qty <= 0:
-                        # Kein offener Bestand aus diesem Grid zum Verkaufen -
-                        # Level wird uebersprungen statt einen naked Short zu eroeffnen
-                        with plock:
-                            pstate["bots"]["grid"]["grid_orders"][i]["filled"] = True
-                        blog("grid",f"Grid SELL @ {level:.2f} [Level {i+1}/{n}] uebersprungen - kein offener Bestand","WARN")
-                        continue
-
-                    if side == "BUY":
-                        order_side, trade_side = "buy", "open"
-                        qty_trade = qty_lvl
-                    else:
-                        order_side, trade_side = "sell", "close"
-                        qty_trade = min(qty_lvl, net_qty)
-                    qty_str = fmt_q(sym, qty_trade)
-                    # Market-Order: sofortige Ausfuehrung zum aktuellen Preis,
-                    # kein Risiko dass der Wick vorbei ist bevor die Limit-Order greift
+            # Preis faellt auf das naechste Level DARUNTER -> KAUFEN (open). Nur ein Schritt
+            # pro Zyklus (bei schnellen Moves bewusst nur das naechste Level, s. DEPLOYMENT.md).
+            if current_idx > 0 and px <= levels[current_idx - 1]:
+                current_idx -= 1
+                qsg = fmt_q(sym, qty_lvl)
+                ok_sz, why = _size_check(qsg, px, qty_lvl * px)
+                if not ok_sz:
+                    blog("grid",f"Grid BUY @ {levels[current_idx]:.2f} abgebrochen – {why}","ERROR")
+                    resp = {}
+                else:
                     resp = client.post("/api/v2/mix/order/place-order", {
                         "symbol": sym, "productType": PRODUCT_TYPE,
                         "marginMode":"isolated","marginCoin":MARGIN_COIN,
-                        "size": qty_str, "side": order_side,
-                        "tradeSide": trade_side, "orderType":"market","force":"ioc",
+                        "size": qsg, "side": "buy",
+                        "tradeSide":"open","orderType":"market","force":"ioc",
                     })
+                ok = resp.get("code") == "00000"
+                if ok:
+                    net_qty += qty_lvl; held.append(current_idx); trades += 1
+                status = "✓" if ok else f"Fehler {resp.get('msg','')}"
+                blog("grid",f"Grid BUY @ {levels[current_idx]:.2f} [Level {current_idx+1}/{n}] {status}",
+                     "TRADE" if ok else "ERROR")
+
+            # Preis steigt auf das naechste Level DARUEBER -> VERKAUFEN (close) - nur mit Bestand
+            elif current_idx < n and px >= levels[current_idx + 1]:
+                current_idx += 1
+                if net_qty <= 0 or not held:
+                    blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx+1}/{n}] uebersprungen - kein Bestand","WARN")
+                else:
+                    qty_trade = min(qty_lvl, net_qty)
+                    qss = fmt_q(sym, qty_trade)
+                    ok_sz, why = _size_check(qss, px, qty_trade * px)
+                    if not ok_sz:
+                        blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} abgebrochen – {why}","ERROR")
+                        resp = {}
+                    else:
+                        resp = client.post("/api/v2/mix/order/place-order", {
+                            "symbol": sym, "productType": PRODUCT_TYPE,
+                            "marginMode":"isolated","marginCoin":MARGIN_COIN,
+                            "size": qss, "side": "sell",
+                            "tradeSide":"close","orderType":"market","force":"ioc",
+                        })
                     ok = resp.get("code") == "00000"
                     if ok:
-                        if side == "BUY":
-                            net_qty += qty_lvl
-                        else:
-                            pnl     += qty_trade * step
-                            net_qty  = max(0.0, net_qty - qty_trade)
-                    with plock:
-                        pstate["bots"]["grid"]["grid_orders"][i]["filled"] = True
-                        pstate["bots"]["grid"]["filled"]      = sum(filled)
-                        pstate["bots"]["grid"]["trade_count"] = sum(filled)
-                        pstate["bots"]["grid"]["pnl"]         = round(pnl,4)
-                    status = "✓" if ok else f"Fehler {resp.get('msg','')}"
-                    blog("grid",f"Grid {side} @ {level:.2f} [Level {i+1}/{n}] {status}",
-                         "TRADE" if ok else "ERROR")
-                elif filled[i] and abs(px - level) / level > 0.005:
-                    filled[i] = False
-                    with plock:
-                        pstate["bots"]["grid"]["grid_orders"][i]["filled"] = False
+                        # Schaetzung: Level-Abstand minus geschaetzte Round-Trip-Gebuehren.
+                        # (Kein echter Fill-Preis -> Slippage nicht beruecksichtigt, s. Doku.)
+                        pnl += qty_trade * step - qty_trade * px * fee_rate * 2
+                        net_qty = max(0.0, net_qty - qty_trade)
+                        if held: held.pop()
+                        trades += 1
+                    if resp:
+                        status = "✓" if ok else f"Fehler {resp.get('msg','')}"
+                        blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx+1}/{n}] {status}",
+                             "TRADE" if ok else "ERROR")
 
             bal = client.balance(retries=2) or start_bal
             with plock:
+                go = pstate["bots"]["grid"]["grid_orders"]
+                hs = set(held)
+                for i in range(len(go)):
+                    go[i]["filled"] = (i in hs)
                 pstate["bots"]["grid"].update({
+                    "filled":len(held), "trade_count":trades, "pnl":round(pnl,4),
                     "balance":round(bal,2),
                     "last_update":datetime.now().strftime("%H:%M:%S"),
                 })
@@ -1863,9 +2005,13 @@ def run_grid_instance(flag, inst_cfg, inst_id):
     step   = (upper - lower) / n
     levels = [lower + i * step for i in range(n+1)]
     qty_l  = (invest / n) / ((upper + lower) / 2)
-    filled = [False] * (n+1)
+    fee_rate = 0.0004  # Bitget Taker-Fee (Schaetzung fuer den PnL-Zaehler)
     pnl    = 0.0
-    net_qty = 0.0  # aktuell durch diese Grid-Instanz gehaltene Long-Menge (lokale Buchhaltung)
+    net_qty = 0.0
+    held   = []       # Stack der Level-Indizes mit offenem Kauf
+    trades = 0
+    # Crossing-Logik (wie run_grid): kaufen beim Kreuzen nach unten, verkaufen nach oben.
+    current_idx = min(range(len(levels)), key=lambda i: abs(levels[i]-cur_price)) if cur_price > 0 else n // 2
 
     with plock:
         pstate["grid_instances"][inst_id].update({
@@ -1882,61 +2028,70 @@ def run_grid_instance(flag, inst_cfg, inst_id):
             px = client.price(sym)
             if px <= 0: time.sleep(check); continue
 
-            for i, level in enumerate(levels):
-                if abs(px - level) / level < 0.002 and not filled[i]:
-                    filled[i]  = True
-                    side_label = "BUY" if px <= (upper+lower)/2 else "SELL"
-
-                    if side_label == "SELL" and net_qty <= 0:
-                        with plock:
-                            gi = pstate["grid_instances"].get(inst_id,{})
-                            if "grid_orders" in gi and i < len(gi["grid_orders"]):
-                                gi["grid_orders"][i]["filled"] = True
-                        _ilog(inst_id, name, f"Grid SELL @ {level:.2f} L{i+1}/{n} uebersprungen - kein offener Bestand","WARN")
-                        continue
-
-                    if side_label == "BUY":
-                        order_side, trade_side = "buy", "open"
-                        qty_trade = qty_l
-                    else:
-                        order_side, trade_side = "sell", "close"
-                        qty_trade = min(qty_l, net_qty)
+            if current_idx > 0 and px <= levels[current_idx - 1]:
+                current_idx -= 1
+                qsg = fmt_q(sym, qty_l)
+                ok_sz, why = _size_check(qsg, px, qty_l * px)
+                if not ok_sz:
+                    _ilog(inst_id, name, f"Grid BUY @ {levels[current_idx]:.2f} abgebrochen – {why}","ERROR")
+                    resp = {}
+                else:
                     resp = client.post("/api/v2/mix/order/place-order", {
                         "symbol":sym,"productType":PRODUCT_TYPE,
                         "marginMode":"isolated","marginCoin":MARGIN_COIN,
-                        "size":fmt_q(sym, qty_trade),"side":order_side,
-                        "tradeSide":trade_side,"orderType":"market","force":"ioc",
+                        "size":qsg,"side":"buy",
+                        "tradeSide":"open","orderType":"market","force":"ioc",
+                    })
+                ok = resp.get("code") == "00000"
+                if ok:
+                    net_qty += qty_l; held.append(current_idx); trades += 1
+                if resp:
+                    istatus = "OK" if ok else f"Fehler {resp.get('msg','')}"
+                    _ilog(inst_id, name, f"Grid BUY @ {levels[current_idx]:.2f} L{current_idx+1}/{n} {istatus}",
+                          "TRADE" if ok else "ERROR")
+
+            elif current_idx < n and px >= levels[current_idx + 1]:
+                current_idx += 1
+                if net_qty <= 0 or not held:
+                    _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx+1}/{n} uebersprungen - kein Bestand","WARN")
+                else:
+                    qty_trade = min(qty_l, net_qty)
+                    qss = fmt_q(sym, qty_trade)
+                    ok_sz, why = _size_check(qss, px, qty_trade * px)
+                    if not ok_sz:
+                        _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} abgebrochen – {why}","ERROR")
+                        resp = {}
+                    else:
+                        resp = client.post("/api/v2/mix/order/place-order", {
+                        "symbol":sym,"productType":PRODUCT_TYPE,
+                        "marginMode":"isolated","marginCoin":MARGIN_COIN,
+                        "size":qss,"side":"sell",
+                        "tradeSide":"close","orderType":"market","force":"ioc",
                     })
                     ok = resp.get("code") == "00000"
                     if ok:
-                        if side_label == "BUY":
-                            net_qty += qty_l
-                        else:
-                            pnl     += qty_trade * step
-                            net_qty  = max(0.0, net_qty - qty_trade)
-                    with plock:
-                        gi = pstate["grid_instances"].get(inst_id,{})
-                        if "grid_orders" in gi and i < len(gi["grid_orders"]):
-                            gi["grid_orders"][i]["filled"] = True
-                        gi["filled"]      = sum(filled)
-                        gi["trade_count"] = sum(filled)
-                        gi["pnl"]         = round(pnl,4)
+                        # Schaetzung: Level-Abstand minus geschaetzte Round-Trip-Gebuehren.
+                        # (Kein echter Fill-Preis -> Slippage nicht beruecksichtigt, s. Doku.)
+                        pnl += qty_trade * step - qty_trade * px * fee_rate * 2
+                        net_qty = max(0.0, net_qty - qty_trade)
+                        if held: held.pop()
+                        trades += 1
                     istatus = "OK" if ok else f"Fehler {resp.get('msg','')}"
-                    _ilog(inst_id, name, f"Grid {side_label} @ {level:.2f} L{i+1}/{n} {istatus}",
+                    _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx+1}/{n} {istatus}",
                           "TRADE" if ok else "ERROR")
-                elif filled[i] and abs(px - level)/level > 0.005:
-                    filled[i] = False
-                    with plock:
-                        gi = pstate["grid_instances"].get(inst_id,{})
-                        if "grid_orders" in gi and i < len(gi["grid_orders"]):
-                            gi["grid_orders"][i]["filled"] = False
 
             bal = client.balance(retries=2) or start_bal
             with plock:
-                pstate["grid_instances"].get(inst_id,{}).update({
-                    "balance":round(bal,2),
-                    "last_update":datetime.now().strftime("%H:%M:%S"),
-                })
+                gi = pstate["grid_instances"].get(inst_id,{})
+                if "grid_orders" in gi:
+                    hs = set(held)
+                    for i in range(len(gi["grid_orders"])):
+                        gi["grid_orders"][i]["filled"] = (i in hs)
+                gi["filled"]      = len(held)
+                gi["trade_count"] = trades
+                gi["pnl"]         = round(pnl,4)
+                gi["balance"]     = round(bal,2)
+                gi["last_update"] = datetime.now().strftime("%H:%M:%S")
         except Exception as e:
             _ilog(inst_id, name, f"Loop: {e}", "ERROR")
         time.sleep(check)
@@ -2051,11 +2206,12 @@ def run_dca(flag):
     # DCA ist ein reiner Spot-Bot. Wir starten mit Spot-Balance,
     # auch wenn sie 0 ist – kein Fallback auf Futures (wuerde PnL verfaelschen).
     start_bal = client.spot_balance("USDT")
-    total_inv = 0.0
-    total_qty = 0.0
-    buy_count = 0
-    last_buy  = 0.0
+    # Persistierten Stand laden -> keine Amnesie nach Neustart, und kein Sofort-Kauf
+    # bei jedem Start (last_buy bleibt erhalten).
+    total_inv, total_qty, buy_count, last_buy = dca_load_state(sym)
     pnl       = 0.0
+    if buy_count > 0:
+        blog("dca", f"Fortgesetzt: {buy_count} Kaeufe, {total_inv:.2f} USDT investiert (aus dca_state.json)")
 
     with plock:
         pstate["bots"]["dca"].update({
@@ -2079,6 +2235,7 @@ def run_dca(flag):
                         total_qty += qty
                         buy_count += 1
                         last_buy   = now
+                        dca_save_state(sym, total_inv, total_qty, buy_count, last_buy)
                         avg = total_inv / total_qty if total_qty > 0 else 0
                         blog("dca",
                             f"Spot-Kauf: ~{qty:.6f} {sym.replace('USDT','')} "
@@ -2117,6 +2274,40 @@ def run_dca(flag):
 # ─────────────────────────────────────────────
 #  NOTFALL-STOPP (PANIC BUTTON)
 # ─────────────────────────────────────────────
+def _panic_close_account(client, label, cancel_syms):
+    """Schliesst alle offenen Positionen und storniert Orders fuer EIN Konto (client).
+    Gibt (geschlossen, fehler) zurueck. Wird pro Haupt-Bot UND pro Grid-Instanz genutzt."""
+    c, e = 0, 0
+    r = client.get("/api/v2/mix/position/all-position",
+                   {"productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN})
+    for pos in r.get("data", []):
+        if float(pos.get("total", 0)) <= 0:
+            continue
+        sym = pos.get("symbol", "")
+        ok, last_msg = False, ""
+        for _ in range(3):
+            resp = client.post("/api/v2/mix/order/place-order", {
+                "symbol": sym, "productType": PRODUCT_TYPE,
+                "marginMode": "isolated", "marginCoin": MARGIN_COIN,
+                "size": str(pos["total"]),
+                "side": "sell" if pos["holdSide"] == "long" else "buy",
+                "tradeSide": "close", "orderType": "market", "force": "ioc",
+            })
+            if resp.get("code") == "00000":
+                ok = True; break
+            last_msg = resp.get("msg", ""); time.sleep(1)
+        if ok:
+            c += 1; log.info(f"[PANIC] {label}: {sym} {pos['holdSide']} geschlossen")
+        else:
+            e += 1
+            log.error(f"[PANIC] {label}: {sym} Fehler nach 3 Versuchen: {last_msg}")
+            notify(f"[NOTFALL-STOPP] FEHLER: {label} {sym} konnte nicht geschlossen werden: {last_msg}", True)
+    for csym in {s for s in cancel_syms if s}:
+        client.post("/api/v2/mix/order/cancel-all",
+                    {"symbol": csym, "productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN})
+        time.sleep(0.15)
+    return c, e
+
 def emergency_stop():
     """Stoppt alle Bots, storniert offene Orders und schliesst alle Positionen per Market."""
     log.warning("!!! NOTFALL-STOPP AUSGELOEST !!!")
@@ -2128,6 +2319,12 @@ def emergency_stop():
             bot_flags[bid]["stop"] = True
         with plock:
             pstate["bots"][bid]["status"] = "EMERGENCY STOP"
+    # Auch alle Multi-Grid-Instanzen stoppen (eigene Threads/Sub-Accounts)
+    for iid, f in list(grid_inst_flags.items()):
+        f["stop"] = True
+        with plock:
+            if iid in pstate.get("grid_instances", {}):
+                pstate["grid_instances"][iid]["status"] = "EMERGENCY STOP"
 
     cfg  = load_config()
     live = cfg.get("live_mode", False)
@@ -2137,46 +2334,31 @@ def emergency_stop():
         bc = cfg["bots"].get(bid, {})
         if not bc.get("api_key") or not bc.get("api_secret"):
             continue
+        # Nur relevante Symbole stornieren (nicht ~250 aus TICK_DEC -> 429).
+        if bid == "signal":  csyms = list(bc.get("tokens", []))
+        elif bid == "grid":  csyms = [bc.get("symbol", "")]
+        else:                csyms = []   # funding handelt nicht, dca ist Spot
         try:
             client = BitgetClient(bc["api_key"], bc["api_secret"], bc["passphrase"], live)
-
-            # Alle offenen Positionen abfragen und schliessen
-            r = client.get("/api/v2/mix/position/all-position",
-                {"productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN})
-            for pos in r.get("data", []):
-                if float(pos.get("total", 0)) <= 0:
-                    continue
-                sym = pos.get("symbol","")
-                ok, last_msg = False, ""
-                for close_attempt in range(3):
-                    resp = client.post("/api/v2/mix/order/place-order", {
-                        "symbol": sym, "productType": PRODUCT_TYPE,
-                        "marginMode":"isolated","marginCoin":MARGIN_COIN,
-                        "size": str(pos["total"]),
-                        "side": "sell" if pos["holdSide"]=="long" else "buy",
-                        "tradeSide":"close","orderType":"market","force":"ioc",
-                    })
-                    if resp.get("code") == "00000":
-                        ok = True
-                        break
-                    last_msg = resp.get("msg","")
-                    time.sleep(1)
-                if ok:
-                    closed += 1
-                    log.info(f"[PANIC] {bid}: {sym} {pos['holdSide']} geschlossen")
-                else:
-                    errors += 1
-                    log.error(f"[PANIC] {bid}: {sym} Fehler nach 3 Versuchen: {last_msg}")
-                    notify(f"[NOTFALL-STOPP] FEHLER: {bid} {sym} konnte nicht geschlossen werden: {last_msg}", True)
-
-            # Alle offenen Limit-Orders stornieren (z.B. Grid-Orders)
-            for sym in list(TICK_DEC.keys()):
-                client.post("/api/v2/mix/order/cancel-all",
-                    {"symbol": sym, "productType": PRODUCT_TYPE,
-                     "marginCoin": MARGIN_COIN})
-        except Exception as e:
+            c, e = _panic_close_account(client, bid, csyms)
+            closed += c; errors += e
+        except Exception as ex:
             errors += 1
-            log.error(f"[PANIC] {bid}: {e}")
+            log.error(f"[PANIC] {bid}: {ex}")
+
+    # Multi-Grid-Instanzen: jede laeuft auf ihrem EIGENEN Sub-Account mit eigenen Keys ->
+    # separater Client, sonst bleiben ihre Positionen/Orders beim Notfall-Stopp offen.
+    for inst in cfg.get("grid_instances", []):
+        if not inst.get("api_key") or not inst.get("api_secret"):
+            continue
+        label = f"grid:{inst.get('name','?')}"
+        try:
+            iclient = BitgetClient(inst["api_key"], inst["api_secret"], inst["passphrase"], live)
+            c, e = _panic_close_account(iclient, label, [inst.get("symbol", "")])
+            closed += c; errors += e
+        except Exception as ex:
+            errors += 1
+            log.error(f"[PANIC] {label}: {ex}")
 
     summary = f"Notfall-Stopp abgeschlossen: {closed} Positionen geschlossen, {errors} Fehler."
     log.warning(summary)
@@ -2204,13 +2386,23 @@ def daily_summary_thread():
                 funding_est = bots.get("funding",{}).get("pnl",0)
                 active    = sum(1 for b in bots if bots[b].get("status")=="RUNNING")
                 trades    = sum(bots[b].get("trade_count",0) for b in bots)
+                # Multi-Grid-Instanzen mit einrechnen (eigene Threads/Sub-Accounts)
+                insts     = pstate.get("grid_instances", {})
+                inst_pnl  = sum(g.get("pnl",0) for g in insts.values())
+                inst_act  = sum(1 for g in insts.values() if g.get("status")=="RUNNING")
+                inst_trd  = sum(g.get("trade_count",0) for g in insts.values())
+                total_pnl += inst_pnl
+                active    += inst_act
+                trades    += inst_trd
 
+            inst_line = f"davon Grid-Instanzen: {inst_pnl:+.2f} USDT, {inst_act} aktiv\n" if insts else ""
             notify(
                 f"[DAILY SUMMARY] {datetime.now().strftime('%d.%m.%Y')}\n"
                 f"Modus: {'LIVE' if pstate.get('live_mode') else 'DEMO'}\n"
-                f"PnL gesamt (Signal/Grid/DCA): {total_pnl:+.2f} USDT\n"
+                f"PnL gesamt (Signal/Grid/DCA + Instanzen): {total_pnl:+.2f} USDT\n"
+                f"{inst_line}"
                 f"Funding Bot Schaetzung: {funding_est:+.2f} USDT (kein echter Trade)\n"
-                f"Aktive Bots: {active}/4\n"
+                f"Aktive Bots/Grids: {active}\n"
                 f"Trades heute: {trades}"
             )
         except Exception as e:
@@ -2253,7 +2445,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Trading Platform v1</title>
+<title>Trading Platform v1.1</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
 <style>
@@ -2561,7 +2753,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
 <body>
 
 <nav class="nav">
-  <div class="nav-brand">TRADING PLATFORM v1</div>
+  <div class="nav-brand">TRADING PLATFORM v1.1</div>
   <button class="tab" data-tab="overview" onclick="switchTab('overview')">OVERVIEW</button>
   <button class="tab" data-tab="signal" data-bot="signal" onclick="switchTab('signal')">
     SIGNAL<span class="status-dot dot-stop" id="dot-signal"></span>
@@ -2953,6 +3145,9 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
       <div><div class="card-label" style="margin-bottom:4px">Take Profit %</div>
         <input type="number" id="bt-tp" value="2.0" step="0.1" min="0.1" max="10"
           style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%"></div>
+      <div><div class="card-label" style="margin-bottom:4px" data-i18n="bt_pos">Positionsgroesse %</div>
+        <input type="number" id="bt-pos" value="10" step="1" min="1" max="100" title="Anteil des Kapitals als Margin pro Trade (Live: Risiko pro Trade %)"
+          style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%"></div>
     </div>
     <button onclick="runBacktest()" id="bt-run-btn" class="btn btn-start" style="--accent:var(--signal);width:100%;padding:10px">
       BACKTEST STARTEN
@@ -3273,6 +3468,24 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="settings-note" data-i18n="note_adx">ADX-Trendfilter: daempft das Signal, wenn kein klarer Trend da ist (ADX unter Schwelle) – handelt weniger im Seitwaerts-Gezappel. Fail-open bei zu wenig Daten.</div>
         <div class="field-row"><label data-i18n="lbl_ob">Order-Book-Kaufdruck</label><input type="checkbox" id="sig-ob-signal" style="width:auto"></div>
         <div class="settings-note" data-i18n="note_ob">Order-Book-Kaufdruck: bezieht den Kauf-/Verkaufsdruck aus dem Live-Orderbuch als zusaetzlichen Signal-Faktor mit ein. Fail-open, wenn keine Daten verfuegbar sind.</div>
+        <div class="field-row" style="grid-template-columns:1fr;align-items:start">
+          <label data-i18n="lbl_factors" style="margin-bottom:6px">Score-Faktoren (an/aus)</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:5px 14px;font-size:11px;color:var(--text)">
+            <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-ema" style="width:auto"> EMA-Cross</label>
+            <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-rsi" style="width:auto"> RSI</label>
+            <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-macd" style="width:auto"> MACD</label>
+            <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-bb" style="width:auto"> Bollinger</label>
+            <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-volume" style="width:auto"> Volumen</label>
+            <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-funding" style="width:auto"> Funding</label>
+            <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-fg" style="width:auto"> Fear &amp; Greed</label>
+            <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-news" style="width:auto"> News</label>
+            <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-macro" style="width:auto"> Makro</label>
+          </div>
+        </div>
+        <div class="settings-note" data-i18n="note_factors">Score-Faktoren: schalte einzelne Indikatoren an/aus. Alle bestehenden sind standardmaessig an. Die Beitraege jedes Faktors siehst du live im SIGNAL-Tab pro Coin.</div>
+        <div class="field-row"><label data-i18n="lbl_trend">Trendfilter (lange EMA)</label><input type="checkbox" id="sig-f-trend" style="width:auto"></div>
+        <div class="field-row"><label data-i18n="lbl_trend_len">Trend-EMA Laenge (20-200)</label><input type="number" id="sig-trend-len" placeholder="50" min="20" max="200"></div>
+        <div class="settings-note" data-i18n="note_trend">Trendfilter (MT5-Stil): zusaetzlicher Faktor +1/-1, je nachdem ob der Preis ueber/unter einer langen EMA liegt. Standardmaessig AUS. Macht Signale selektiver (handelt eher mit dem uebergeordneten Trend).</div>
         <div class="field-row"><label data-i18n="lbl_sig_thresh">Signal-Schwelle (2-5)</label><input type="number" id="sig-thresh" placeholder="3" min="2" max="5"></div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('signal')">Verbindung testen</button>
@@ -3488,7 +3701,7 @@ const STRINGS = {
     fg_chart:'Fear & Greed Index - 30 Tage',
     // Backtest
     bt_start:'BACKTEST STARTEN', bt_symbol:'Symbol',
-    bt_period:'Zeitraum', bt_lever:'Hebel', bt_thresh:'Signal-Schwelle (1-3)',
+    bt_period:'Zeitraum', bt_lever:'Hebel', bt_thresh:'Signal-Schwelle (1-3)', bt_pos:'Positionsgroesse %',
     bt_sl:'Stop Loss %', bt_tp:'Take Profit %',
     bt_wf:'Walk-Forward (70/30 Train/Test Split)',
     bt_compare:'ALLE SYMBOLE VERGLEICHEN',
@@ -3535,6 +3748,10 @@ const STRINGS = {
     note_adx:'ADX-Trendfilter: daempft das Signal, wenn kein klarer Trend da ist (ADX unter Schwelle) – handelt weniger im Seitwaerts-Gezappel. Fail-open bei zu wenig Daten.',
     lbl_ob:'Order-Book-Kaufdruck',
     note_ob:'Order-Book-Kaufdruck: bezieht den Kauf-/Verkaufsdruck aus dem Live-Orderbuch als zusaetzlichen Signal-Faktor mit ein. Fail-open, wenn keine Daten verfuegbar sind.',
+    lbl_factors:'Score-Faktoren (an/aus)',
+    note_factors:'Score-Faktoren: schalte einzelne Indikatoren an/aus. Alle bestehenden sind standardmaessig an. Die Beitraege jedes Faktors siehst du live im SIGNAL-Tab pro Coin.',
+    lbl_trend:'Trendfilter (lange EMA)', lbl_trend_len:'Trend-EMA Laenge (20-200)',
+    note_trend:'Trendfilter (MT5-Stil): zusaetzlicher Faktor +1/-1, je nachdem ob der Preis ueber/unter einer langen EMA liegt. Standardmaessig AUS. Macht Signale selektiver (handelt eher mit dem uebergeordneten Trend).',
     lbl_sig_thresh:'Signal-Schwelle (2-5)',
     grid_oneway_warn:'<b>WICHTIG:</b> Bitget Sub-Account muss auf <b>One-Way Mode</b> stehen!<br>Bitget App: Futures-Handel -> Einstellungen -> Positionsmodus -> One-Way Mode.<br>Im Hedge-Modus oeffnet der Grid Bot ungewollt gegenlaeutige Positionen.',
     lbl_price_up:'Preis oben (0 = auto)', lbl_price_low:'Preis unten (0 = auto)', lbl_levels:'Anzahl Levels',
@@ -3616,7 +3833,7 @@ const STRINGS = {
     positions:'Open Positions (all Bots)',
     fg_chart:'Fear & Greed Index - 30 Days',
     bt_start:'START BACKTEST', bt_symbol:'Symbol',
-    bt_period:'Period', bt_lever:'Leverage', bt_thresh:'Signal Threshold (1-3)',
+    bt_period:'Period', bt_lever:'Leverage', bt_thresh:'Signal Threshold (1-3)', bt_pos:'Position size %',
     bt_sl:'Stop Loss %', bt_tp:'Take Profit %',
     bt_wf:'Walk-Forward (70/30 Train/Test Split)',
     bt_compare:'COMPARE ALL SYMBOLS',
@@ -3661,6 +3878,10 @@ const STRINGS = {
     note_adx:'ADX trend filter: dampens the signal when there is no clear trend (ADX below threshold) – trades less in sideways chop. Fail-open when there is too little data.',
     lbl_ob:'Order-book buy pressure',
     note_ob:'Order-book buy pressure: includes buy/sell pressure from the live order book as an extra signal factor. Fail-open when no data is available.',
+    lbl_factors:'Score factors (on/off)',
+    note_factors:'Score factors: turn individual indicators on/off. All existing ones are on by default. You can see each factor\'s contribution live per coin in the SIGNAL tab.',
+    lbl_trend:'Trend filter (long EMA)', lbl_trend_len:'Trend EMA length (20-200)',
+    note_trend:'Trend filter (MT5 style): extra +1/-1 factor depending on whether price is above/below a long EMA. Off by default. Makes signals more selective (trades more with the higher-timeframe trend).',
     lbl_sig_thresh:'Signal threshold (2-5)',
     grid_oneway_warn:'<b>IMPORTANT:</b> the Bitget sub-account must be set to <b>One-Way Mode</b>!<br>Bitget app: Futures trading -> Settings -> Position mode -> One-Way Mode.<br>In Hedge mode the Grid Bot unintentionally opens opposing positions.',
     lbl_price_up:'Upper price (0 = auto)', lbl_price_low:'Lower price (0 = auto)', lbl_levels:'Number of levels',
@@ -3761,6 +3982,8 @@ const HELP_TEXT = {
            ['Max Drawdown','Groesster Verlust vom Hochpunkt. Unter 15% ist sicher.'],
            ['Gebuehren','0.04% Taker-Fee pro Trade. Oft unterschaetzt!'],
          ]},
+        {title:'Wichtige Einschraenkung',
+         text:'Der Backtest nutzt nur technische Indikatoren (RSI, EMA, MACD). Makro-Blackouts, Funding Rates, News-Sentiment, Fear&Greed, Korrelations-/ADX-Filter und der Volatilitaets-Circuit-Breaker (>5% BTC in 1h pausiert live alle Bots) sind NICHT eingebaut. Der Backtest nimmt Flash-Crashes also voll mit, waehrend das echte System dann pausiert haette. Das echte System hat dadurch oft bessere Ergebnisse als der Backtest zeigt, aber auch mehr Pausen.'},
       ]},
     en: {title:'BACKTESTING', sub:'Test Signal Bot strategy on historical data', accent:'#00d68f',
       sections:[
@@ -3775,6 +3998,8 @@ const HELP_TEXT = {
            ['Max Drawdown','Largest loss from peak. Below 15% is safe.'],
            ['Fees','0.04% taker fee per trade. Often underestimated!'],
          ]},
+        {title:'Important Limitation',
+         text:'The backtest only uses technical indicators (RSI, EMA, MACD). Macro blackouts, funding rates, news sentiment, fear & greed, correlation/ADX filters and the volatility circuit breaker (>5% BTC in 1h pauses all live bots) are NOT built in. Therefore, the backtest takes full flash crashes, while the real system would have paused.'},
       ]},
   },
   alerts: {
@@ -4260,7 +4485,7 @@ const HELP = {
       {title:'Was ist Backtesting?',
        text:'Backtesting simuliert wie der Signal Bot in der Vergangenheit gehandelt haette. Du konfigurierst dieselben Parameter (Hebel, Schwelle, SL, TP) und der Bot laeuft rueckwirkend durch historische 1H-Kerzen. Das Ergebnis zeigt ob die Strategie unter echten Marktbedingungen profitabel gewesen waere.'},
       {title:'Wichtige Einschraenkung',
-       text:'Der Backtest verwendet nur technische Indikatoren (RSI, EMA, MACD). Makro-Blackouts, Funding Rates, News-Sentiment und Fear&Greed sind NICHT eingebaut. Das echte System hat dadurch oft bessere Ergebnisse als der Backtest zeigt, aber auch mehr Pausen.'},
+       text:'Der Backtest verwendet nur technische Indikatoren (RSI, EMA, MACD). Makro-Blackouts, Funding Rates, News-Sentiment, Fear&Greed, Korrelations-/ADX-Filter und der Volatilitaets-Circuit-Breaker (>5% BTC in 1h pausiert live alle Bots) sind NICHT eingebaut. Der Backtest nimmt Flash-Crashes also voll mit, waehrend das echte System dann pausiert haette. Das echte System hat dadurch oft bessere Ergebnisse als der Backtest zeigt, aber auch mehr Pausen.'},
       {title:'Kennzahlen erklaert',
        table:[
          ['Win Rate','Anteil profitabler Trades. Ueber 55% ist gut.'],
@@ -4379,6 +4604,9 @@ async function runMultiBacktest() {
         period_days: parseInt(document.getElementById('bt-days').value)||14,
         leverage:    parseInt(document.getElementById('bt-lever').value)||3,
         threshold:   parseInt(document.getElementById('bt-thresh').value)||2,
+        sl_pct:      parseFloat(document.getElementById('bt-sl').value)/100||0.01,
+        tp_pct:      parseFloat(document.getElementById('bt-tp').value)/100||0.02,
+        pos_pct:     parseFloat(document.getElementById('bt-pos').value)||10,
       })
     });
     const d = await r.json();
@@ -4394,7 +4622,7 @@ function renderMultiBacktest(d) {
   const symbols = Object.keys(d);
   const rows = symbols.map(sym => {
     const r = d[sym];
-    if (r.error) return '<div class="ov-row" style="grid-template-columns:90px 1fr 70px 70px 70px 70px 70px"><span>'+sym+'</span><span style="color:var(--red)">'+r.error+'</span></div>';
+    if (r.error) return '<div class="ov-row" style="grid-template-columns:90px 1fr 70px 70px 70px 70px 70px"><span>'+esc(sym)+'</span><span style="color:var(--red)">'+esc(r.error)+'</span></div>';
     const pc  = r.total_pnl >= 0 ? 'var(--signal)' : 'var(--red)';
     const sc  = r.sharpe >= 1.5 ? 'var(--signal)' : r.sharpe >= 1 ? 'var(--dca)' : 'var(--red)';
     return '<div class="ov-row" style="grid-template-columns:90px 1fr 70px 70px 70px 70px 70px">' +
@@ -4896,6 +5124,7 @@ async function runBacktest() {
         threshold:    parseInt(document.getElementById('bt-thresh').value)||2,
         sl_pct:       parseFloat(document.getElementById('bt-sl').value)/100||0.01,
         tp_pct:       parseFloat(document.getElementById('bt-tp').value)/100||0.02,
+        pos_pct:      parseFloat(document.getElementById('bt-pos').value)||10,
         walk_forward: document.getElementById('bt-walkforward')?.checked||false,
       })
     });
@@ -5322,6 +5551,11 @@ function renderTokenCard(sym, d) {
       <div class="ind"><span>uPnL</span><span style="color:${upnl>=0?'var(--signal)':'var(--red)'}">${(upnl>=0?'+':'')+upnl.toFixed(3)}</span></div>
     </div>`;
   }
+  const PART_LABELS = {ema:'EMA',rsi:'RSI',macd:'MACD',bb:'BB',volume:'Vol',funding:'Fund',fear_greed:'F&G',news:'News',orderbook:'OB',macro:'Makro',trend:'Trend'};
+  const parts = d.score_parts||{}; const pk = Object.keys(parts);
+  const breakdown = pk.length
+    ? pk.map(k=>`<span style="color:${parts[k]>0?'var(--signal)':'var(--red)'}">${esc(PART_LABELS[k]||k)} ${parts[k]>0?'+':''}${parts[k]}</span>`).join(' · ')
+    : '<span style="color:var(--dim)">–</span>';
   return `<div class="tc">
     <div class="tc-name"><span>${name}</span><span style="font-size:10px;color:var(--muted)">${d.fear_greed||50}</span></div>
     <div class="sdots">${dots}</div>
@@ -5333,6 +5567,7 @@ function renderTokenCard(sym, d) {
     <div class="ind"><span>Kaufdruck</span><span style="color:${d.ob_ratio==null?'#888':(d.ob_ratio>=1.1?'var(--signal)':d.ob_ratio<=0.9?'var(--red)':'#888')}">${d.ob_ratio==null?'–':parseFloat(d.ob_ratio).toFixed(2)}</span></div>
     <div class="ind"><span>Funding</span><span style="color:${frColor}">${(parseFloat(d.funding_rate||0)*100).toFixed(4)}%</span></div>
     <div class="ind"><span>News</span><span style="color:${sentColor}">${d.sentiment||'neutral'}</span></div>
+    <div style="font-size:9px;color:var(--muted);margin-top:6px;padding-top:6px;border-top:1px solid var(--border);line-height:1.8">${breakdown}</div>
     ${posHtml}
   </div>`;
 }
@@ -5585,6 +5820,13 @@ function fillSettingsForm(state) {
     document.getElementById('sig-adx-filter').checked = (b.signal?.use_adx_filter !== false);
     document.getElementById('sig-min-adx').value     = s(b.signal?.min_adx ?? 20);
     document.getElementById('sig-ob-signal').checked = (b.signal?.use_orderbook_signal !== false);
+    const sf = k => document.getElementById('sig-f-'+k); const sg = b.signal||{};
+    sf('ema').checked=(sg.use_ema!==false); sf('rsi').checked=(sg.use_rsi!==false);
+    sf('macd').checked=(sg.use_macd!==false); sf('bb').checked=(sg.use_bb!==false);
+    sf('volume').checked=(sg.use_volume!==false); sf('funding').checked=(sg.use_funding!==false);
+    sf('fg').checked=(sg.use_fg!==false); sf('news').checked=(sg.use_news!==false);
+    sf('macro').checked=(sg.use_macro!==false); sf('trend').checked=(sg.use_trend===true);
+    document.getElementById('sig-trend-len').value = s(sg.trend_len ?? 50);
     document.getElementById('sig-thresh').value = s(b.signal?.signal_threshold||3);
     document.getElementById('grd-key').value   = s(b.grid?.api_key);
     document.getElementById('grd-sym').value   = s(b.grid?.symbol||'BTCUSDT');
@@ -5630,6 +5872,17 @@ async function saveSettings() {
         use_adx_filter:   document.getElementById('sig-adx-filter')?.checked ?? true,
         min_adx:          int('sig-min-adx') || 20,
         use_orderbook_signal: document.getElementById('sig-ob-signal')?.checked ?? true,
+        use_ema:     document.getElementById('sig-f-ema')?.checked ?? true,
+        use_rsi:     document.getElementById('sig-f-rsi')?.checked ?? true,
+        use_macd:    document.getElementById('sig-f-macd')?.checked ?? true,
+        use_bb:      document.getElementById('sig-f-bb')?.checked ?? true,
+        use_volume:  document.getElementById('sig-f-volume')?.checked ?? true,
+        use_funding: document.getElementById('sig-f-funding')?.checked ?? true,
+        use_fg:      document.getElementById('sig-f-fg')?.checked ?? true,
+        use_news:    document.getElementById('sig-f-news')?.checked ?? true,
+        use_macro:   document.getElementById('sig-f-macro')?.checked ?? true,
+        use_trend:   document.getElementById('sig-f-trend')?.checked ?? false,
+        trend_len:   int('sig-trend-len') || 50,
         signal_threshold: int('sig-thresh')   || 3,
       },
       grid: {
@@ -5851,6 +6104,7 @@ class Handler(BaseHTTPRequestHandler):
                 sl_pct       = max(0.001, min(0.5, float(data.get("sl_pct", 0.010)))),
                 tp_pct       = max(0.001, min(1.0, float(data.get("tp_pct", 0.020)))),
                 walk_forward = bool(data.get("walk_forward", False)),
+                pos_frac     = max(0.01, min(1.0, float(data.get("pos_pct", 10)) / 100)),
             )
             self._json(result)
 
@@ -5863,6 +6117,9 @@ class Handler(BaseHTTPRequestHandler):
                 period_days = max(1, min(730, int(data.get("period_days", 14)))),
                 leverage    = max(1, min(125, int(data.get("leverage", 3)))),
                 threshold   = max(1, min(10,  int(data.get("threshold", 2)))),
+                sl_pct      = max(0.001, min(0.5, float(data.get("sl_pct", 0.010)))),
+                tp_pct      = max(0.001, min(1.0, float(data.get("tp_pct", 0.020)))),
+                pos_frac    = max(0.01, min(1.0, float(data.get("pos_pct", 10)) / 100)),
             )
             self._json(result)
 
