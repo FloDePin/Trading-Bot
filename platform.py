@@ -63,10 +63,13 @@ def db_save_trade(bot, symbol, side, entry, exit_price, pnl, fee=0.0, size=0.0):
     try:
         with _db_lock:
             conn = sqlite3.connect(DB_FILE)
-            conn.execute('INSERT INTO trades (ts,bot,symbol,side,entry,exit_price,pnl,fee,size) VALUES (?,?,?,?,?,?,?,?,?)',
-                (int(time.time()*1000), bot, symbol, side, entry, exit_price,
-                 round(pnl,4), round(fee,6), size))
-            conn.commit(); conn.close()
+            try:
+                conn.execute('INSERT INTO trades (ts,bot,symbol,side,entry,exit_price,pnl,fee,size) VALUES (?,?,?,?,?,?,?,?,?)',
+                    (int(time.time()*1000), bot, symbol, side, entry, exit_price,
+                     round(pnl,4), round(fee,6), size))
+                conn.commit()
+            finally:
+                conn.close()   # Verbindung IMMER schliessen, auch bei Fehler (kein Leak)
     except Exception as e:
         log.debug(f"db_save_trade: {e}")
 
@@ -74,9 +77,12 @@ def db_save_pnl(bot, pnl, balance):
     try:
         with _db_lock:
             conn = sqlite3.connect(DB_FILE)
-            conn.execute('INSERT INTO pnl_snapshots (ts,bot,pnl,balance) VALUES (?,?,?,?)',
-                (int(time.time()*1000), bot, round(pnl,4), round(balance,2)))
-            conn.commit(); conn.close()
+            try:
+                conn.execute('INSERT INTO pnl_snapshots (ts,bot,pnl,balance) VALUES (?,?,?,?)',
+                    (int(time.time()*1000), bot, round(pnl,4), round(balance,2)))
+                conn.commit()
+            finally:
+                conn.close()
     except Exception as e:
         log.debug(f"db_save_pnl: {e}")
 
@@ -85,10 +91,12 @@ def db_get_pnl_history(bot, days=30):
         since = int((time.time() - days*86400)*1000)
         with _db_lock:
             conn = sqlite3.connect(DB_FILE)
-            rows = conn.execute(
-                'SELECT ts,pnl FROM pnl_snapshots WHERE bot=? AND ts>? ORDER BY ts',
-                (bot, since)).fetchall()
-            conn.close()
+            try:
+                rows = conn.execute(
+                    'SELECT ts,pnl FROM pnl_snapshots WHERE bot=? AND ts>? ORDER BY ts',
+                    (bot, since)).fetchall()
+            finally:
+                conn.close()
         return [{"ts": r[0], "pnl": r[1]} for r in rows]
     except: return []
 
@@ -96,15 +104,17 @@ def db_get_trades(bot=None, limit=200):
     try:
         with _db_lock:
             conn = sqlite3.connect(DB_FILE)
-            if bot and bot != "all":
-                rows = conn.execute(
-                    'SELECT ts,bot,symbol,side,entry,exit_price,pnl,fee FROM trades WHERE bot=? ORDER BY ts DESC LIMIT ?',
-                    (bot, limit)).fetchall()
-            else:
-                rows = conn.execute(
-                    'SELECT ts,bot,symbol,side,entry,exit_price,pnl,fee FROM trades ORDER BY ts DESC LIMIT ?',
-                    (limit,)).fetchall()
-            conn.close()
+            try:
+                if bot and bot != "all":
+                    rows = conn.execute(
+                        'SELECT ts,bot,symbol,side,entry,exit_price,pnl,fee FROM trades WHERE bot=? ORDER BY ts DESC LIMIT ?',
+                        (bot, limit)).fetchall()
+                else:
+                    rows = conn.execute(
+                        'SELECT ts,bot,symbol,side,entry,exit_price,pnl,fee FROM trades ORDER BY ts DESC LIMIT ?',
+                        (limit,)).fetchall()
+            finally:
+                conn.close()
         cols = ['ts','bot','symbol','side','entry','exit','pnl','fee']
         return [dict(zip(cols, r)) for r in rows]
     except: return []
@@ -114,8 +124,10 @@ def db_trade_timing():
     try:
         with _db_lock:
             conn = sqlite3.connect(DB_FILE)
-            rows = conn.execute('SELECT ts, pnl FROM trades').fetchall()
-            conn.close()
+            try:
+                rows = conn.execute('SELECT ts, pnl FROM trades').fetchall()
+            finally:
+                conn.close()
         buckets = {h: [] for h in range(24)}
         for ts, pnl in rows:
             hour = datetime.fromtimestamp(ts/1000).hour
@@ -1374,6 +1386,8 @@ def alert_check_thread():
                             # Funding Bot handelt nicht real - Schaetzung zaehlt nicht in den Alert
                             total = sum(pstate["bots"][b].get("pnl",0)
                                         for b in pstate["bots"] if b != "funding")
+                            # Multi-Grid-Instanzen mit einrechnen (eigene Threads/Sub-Accounts)
+                            total += sum(g.get("pnl",0) for g in pstate.get("grid_instances", {}).values())
                         if total < val and not a.get("triggered"):
                             _alert_note(f"Gesamt-PnL unter {val} USDT (aktuell {total:.2f})")
                             a["triggered"] = True; dirty = True
@@ -1978,7 +1992,12 @@ def _ilog(inst_id, name, msg, level="INFO"):
         logs = inst.get("logs",[])
         logs.insert(0, {"t":ts,"l":level,"m":msg})
         if len(logs) > 40: logs.pop()
-    log.info(f"[grid:{name}] {msg}")
+    getattr(log, level.lower() if level in ("INFO","ERROR") else "warning")(f"[grid:{name}] {msg}")
+    # Telegram/Discord wie bei blog() - Multi-Grid-Instanzen waren bisher stumm
+    if level == "TRADE":
+        notify(f"[OK] GRID {name}: {msg}")
+    elif level == "ERROR":
+        notify(f"[FEHLER] GRID {name}: {msg}", True)
 
 def run_grid_instance(flag, inst_cfg, inst_id):
     name   = inst_cfg.get("name","Grid")
