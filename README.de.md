@@ -45,7 +45,7 @@ Das erste getaggte, stabile Release — alles darunter ist enthalten.
 
 **Frühere Entwicklungs-Meilensteine (vor 1.0):**
 
-### v1.2 (2026-08)
+### v0.3 (2026-08, beta)
 
 **Browser-basierte Erst-Einrichtung**
 - Beim headless-Start (systemd, kein Terminal) generiert das Dashboard **kein Zufallspasswort mehr**. Stattdessen erscheint beim ersten Aufruf ein **Setup-Assistent**, in dem du Benutzername + Passwort (min. 8 Zeichen) selbst festlegst. Danach gilt normale HTTP Basic Auth mit deinen Zugangsdaten, und der Setup-Endpunkt ist dauerhaft gesperrt.
@@ -56,13 +56,13 @@ Das erste getaggte, stabile Release — alles darunter ist enthalten.
 - `setup.sh` erkennt jetzt **Benutzer und Home-Verzeichnis automatisch** (auch unter `sudo`) — nicht mehr fest auf den Nutzer `pi` verdrahtet, funktioniert also auf jedem Pi/Linux unabhängig vom Benutzernamen.
 - Neue Schritt-für-Schritt-Anleitungen: [PI_SETUP.de.md](PI_SETUP.de.md) (DE) / [PI_SETUP.md](PI_SETUP.md) (EN), inkl. Problembehebung (Windows-Zeilenumbrüche, fehlendes `pip3`, Rechte).
 
-### v1.1.1 (2026-08)
+### v0.2.1 (2026-08, beta)
 
 - Der `pnl_below`-Alarm bezieht jetzt **Multi-Grid-Instanzen** in die Summe ein (wurden vorher stillschweigend ausgelassen).
 - Grid-Instanzen senden jetzt **Telegram-/Discord-Benachrichtigungen** bei Trades/Fehlern, wie die Haupt-Bots.
 - Alle SQLite-Verbindungen werden per `try/finally` geschlossen — kein Verbindungsleck, wenn eine Abfrage fehlschlägt.
 
-### v1.1 (2026-08)
+### v0.2 (2026-08, beta)
 
 Ein großes Zuverlässigkeits- und Feature-Release, vor Veröffentlichung vollständig lokal getestet.
 
@@ -89,7 +89,7 @@ Ein großes Zuverlässigkeits- und Feature-Release, vor Veröffentlichung vollst
 - Delistetes **MATIC durch POL** ersetzt (Polygon-Umbenennung).
 - Thread-Safety-, XSS- und Gebühren-Buchhaltungs-Fixes; die Backtest-Hilfe weist jetzt darauf hin, dass der Volatilitäts-Circuit-Breaker nicht simuliert wird.
 
-### v1.0 (2026-07)
+### v0.1 (2026-07, beta)
 
 Erste Härtung / Sicherheitsüberprüfung:
 

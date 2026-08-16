@@ -45,7 +45,7 @@ The first tagged, stable release — everything below is included.
 
 **Earlier development milestones (pre-1.0):**
 
-### v1.2 (2026-08)
+### v0.3 (2026-08, beta)
 
 **Browser-based first-run setup**
 - On a headless start (systemd, no terminal) the dashboard **no longer auto-generates a random password**. Instead, the first visit shows a **setup wizard** where you choose your own username + password (min. 8 characters). After that, normal HTTP Basic Auth applies with your credentials and the setup endpoint is permanently closed.
@@ -56,13 +56,13 @@ The first tagged, stable release — everything below is included.
 - `setup.sh` now **auto-detects the real user and home directory** (works under `sudo` too) — no longer hardcoded to the `pi` user, so it works on any Pi/Linux box regardless of username.
 - New step-by-step Pi install guides: [PI_SETUP.md](PI_SETUP.md) (EN) / [PI_SETUP.de.md](PI_SETUP.de.md) (DE), including a troubleshooting section (Windows line endings, missing `pip3`, permissions).
 
-### v1.1.1 (2026-08)
+### v0.2.1 (2026-08, beta)
 
 - The `pnl_below` alert now includes **Multi-Grid instances** in the total (was silently excluded).
 - Grid instances now send **Telegram/Discord notifications** on trades/errors, matching the main bots.
 - All SQLite connections are closed via `try/finally` — no connection leak if a query raises.
 
-### v1.1 (2026-08)
+### v0.2 (2026-08, beta)
 
 A large reliability + features release, fully tested locally before release.
 
@@ -89,7 +89,7 @@ A large reliability + features release, fully tested locally before release.
 - Replaced delisted **MATIC with POL** (Polygon rebrand).
 - Thread-safety, XSS and fee-accounting fixes; the backtest help now states that the volatility circuit breaker isn't simulated.
 
-### v1.0 (2026-07)
+### v0.1 (2026-07, beta)
 
 Initial hardening / security review:
 
