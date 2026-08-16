@@ -3215,7 +3215,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
           </select></div>
         <div><div class="card-label" style="margin-bottom:4px">Grid Levels</div>
           <input type="number" id="ng-n" value="10" min="2" max="50" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%"></div>
-        <div><div class="card-label" style="margin-bottom:4px">Investment (USDT)</div>
+        <div><div class="card-label" style="margin-bottom:4px">Budget (USDT)</div>
           <input type="number" id="ng-inv" value="100" min="10" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%"></div>
         <div><div class="card-label" style="margin-bottom:4px">API Key</div>
           <input type="text" id="ng-key" placeholder="Bitget API Key" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%"></div>
@@ -3729,7 +3729,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label data-i18n="lbl_price_up">Preis oben (0 = auto)</label><input type="number" id="grd-upper" placeholder="0" min="0"></div>
         <div class="field-row"><label data-i18n="lbl_price_low">Preis unten (0 = auto)</label><input type="number" id="grd-lower" placeholder="0" min="0"></div>
         <div class="field-row"><label data-i18n="lbl_levels">Anzahl Levels</label><input type="number" id="grd-n" placeholder="10" min="2" max="50"></div>
-        <div class="field-row"><label>Investment (USDT)</label><input type="number" id="grd-inv" placeholder="100" min="10"></div>
+        <div class="field-row"><label>Budget (USDT)</label><input type="number" id="grd-inv" placeholder="100" min="10"></div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('grid')">Verbindung testen</button>
           <span class="val-result" id="val-grid"></span>
