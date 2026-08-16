@@ -5612,7 +5612,7 @@ function switchTab(id) {
       t.classList.add('active');
   });
   activePanel = id;
-  if (id === 'settings')  { if (lastState) fillSettingsForm(lastState); }
+  if (id === 'settings')  fillSettingsForm();  // holt /api/config selbst - unabhaengig von lastState (Fix: nach F5 war das Formular sonst leer)
   if (id === 'overview')  { loadPositions(); loadFGHistory(); }
   if (id === 'markt')     { loadMarket(); loadKalender(false); }
   if (id === 'alerts')    { loadAlerts(); loadAlertLog(); }
@@ -6048,6 +6048,7 @@ async function saveSettings() {
     msg.textContent   = d.status === 'ok' ? 'Gespeichert.' : 'Fehler: ' + (d.msg||'');
     msg.style.color   = d.status === 'ok' ? 'var(--signal)' : 'var(--red)';
     setTimeout(() => msg.style.display = 'none', 3000);
+    if (d.status === 'ok') fillSettingsForm();  // Formular direkt aus der gespeicherten Config auffrischen (Key sichtbar, Secret -> "gespeichert")
   } catch(e) { alert('Verbindungsfehler: ' + e.message); }
 }
 
