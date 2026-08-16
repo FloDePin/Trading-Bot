@@ -1,0 +1,9 @@
+# Linux-bound and source files must always use LF line endings, even when the
+# repo is cloned/checked out on Windows. This prevents the classic
+# "$'\r': command not found" crash when shell scripts are copied to a Pi,
+# and keeps platform.py / systemd units clean on the target machine.
+*.sh      text eol=lf
+*.service text eol=lf
+*.py      text eol=lf
+*.md      text eol=lf
+*.txt     text eol=lf
