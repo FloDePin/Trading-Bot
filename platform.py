@@ -2642,7 +2642,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Trading Platform v1.1</title>
+<title>Trading Platform</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
 <style>
@@ -2950,7 +2950,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
 <body>
 
 <nav class="nav">
-  <div class="nav-brand">TRADING PLATFORM v1.1</div>
+  <div class="nav-brand">TRADING PLATFORM</div>
   <button class="tab" data-tab="overview" onclick="switchTab('overview')">OVERVIEW</button>
   <button class="tab" data-tab="signal" data-bot="signal" onclick="switchTab('signal')">
     SIGNAL<span class="status-dot dot-stop" id="dot-signal"></span>
@@ -3656,7 +3656,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label>Leverage (1-10)</label><input type="number" id="sig-lever" placeholder="3" min="1" max="10"></div>
         <div class="field-row"><label data-i18n="lbl_risk_trade">Risiko pro Trade (%)</label><input type="number" id="sig-risk-pct" placeholder="3.0" step="0.5" min="0.5" max="10"></div>
         <div class="field-row"><label data-i18n="lbl_usdt_trade">USDT pro Trade (fallback)</label><input type="number" id="sig-usdt" placeholder="30" min="5"></div>
-        <div class="field-row"><label data-i18n="lbl_budget">Budget (USDT, 0=kein Limit)</label><input type="number" id="sig-budget" placeholder="0" min="0"></div>
+        <div class="field-row"><label data-i18n="lbl_budget">Budget (USDT)</label><input type="number" id="sig-budget" placeholder="0 = kein Limit" min="0" title="Max. Margin, die dieser Bot binden darf. 0 = kein Limit (volle Balance)."></div>
         <div class="field-row"><label data-i18n="lbl_max_conc">Max. gleichzeitige Pos.</label><input type="number" id="sig-max-conc" placeholder="2" min="1" max="4"></div>
         <div class="field-row"><label data-i18n="lbl_corr_filter">Korrelations-Filter</label><input type="checkbox" id="sig-corr-filter" style="width:auto"></div>
         <div class="field-row"><label data-i18n="lbl_max_corr">Max. Korrelation (0.5-1.0)</label><input type="number" id="sig-max-corr" placeholder="0.85" step="0.05" min="0.5" max="1.0"></div>
@@ -3939,7 +3939,7 @@ const STRINGS = {
     ph_tg_chat:'Deine Chat-ID (z.B. 123456789)',
     set_notify_note:'Telegram: @BotFather → /newbot → Token. Chat-ID von @userinfobot.<br>Discord: Server-Einstellungen → Integrationen → Webhooks → URL kopieren.<br>Beide koennen gleichzeitig aktiv sein. News-Sentiment: CoinGecko (kostenlos, kein Key).',
     set_preset:'Preset:', bp_cons:'KONSERVATIV', bp_std:'STANDARD', bp_agg:'AGGRESSIV',
-    lbl_risk_trade:'Risiko pro Trade (%)', lbl_usdt_trade:'USDT pro Trade (fallback)', lbl_budget:'Budget (USDT, 0=kein Limit)',
+    lbl_risk_trade:'Risiko pro Trade (%)', lbl_usdt_trade:'USDT pro Trade (fallback)', lbl_budget:'Budget (USDT)',
     lbl_max_conc:'Max. gleichzeitige Pos.', lbl_corr_filter:'Korrelations-Filter', lbl_max_corr:'Max. Korrelation (0.5-1.0)',
     note_corr:'Korrelations-Filter: verhindert, dass der Bot eine neue Position eroeffnet, die zu stark mit einer bereits offenen, gleichgerichteten Position korreliert (Diversifikation). Bei fehlenden Daten wird normal weitergehandelt.',
     lbl_adx_filter:'ADX-Trendfilter', lbl_min_adx:'Min. ADX (10-40)',
@@ -4069,7 +4069,7 @@ const STRINGS = {
     ph_tg_chat:'Your chat ID (e.g. 123456789)',
     set_notify_note:'Telegram: @BotFather → /newbot → token. Chat ID from @userinfobot.<br>Discord: Server settings → Integrations → Webhooks → copy URL.<br>Both can be active at once. News sentiment: CoinGecko (free, no key).',
     set_preset:'Preset:', bp_cons:'CONSERVATIVE', bp_std:'STANDARD', bp_agg:'AGGRESSIVE',
-    lbl_risk_trade:'Risk per trade (%)', lbl_usdt_trade:'USDT per trade (fallback)', lbl_budget:'Budget (USDT, 0=no limit)',
+    lbl_risk_trade:'Risk per trade (%)', lbl_usdt_trade:'USDT per trade (fallback)', lbl_budget:'Budget (USDT)',
     lbl_max_conc:'Max simultaneous pos.', lbl_corr_filter:'Correlation filter', lbl_max_corr:'Max correlation (0.5-1.0)',
     note_corr:'Correlation filter: prevents the bot from opening a new position that is too strongly correlated with an already-open one in the same direction (diversification). When data is missing it keeps trading as normal.',
     lbl_adx_filter:'ADX trend filter', lbl_min_adx:'Min ADX (10-40)',
@@ -6039,7 +6039,15 @@ function fillSettingsForm(state) {
     document.getElementById('dca-key').value = s(b.dca?.api_key);
     document.getElementById('dca-sym').value = s(b.dca?.symbol||'BTCUSDT');
     document.getElementById('dca-hrs').value = s(b.dca?.interval_hours||24);
-    document.getElementById('dca-amt').value = s(b.dca?.amount_per_buy||20);  }).catch(()=>{});
+    document.getElementById('dca-amt').value = s(b.dca?.amount_per_buy||20);
+    // Secret/Passphrase werden aus Sicherheitsgruenden nicht zurueckgefuellt. Platzhalter
+    // signalisiert, dass sie gespeichert sind - leer lassen = unveraendert (kein Neu-Eintippen).
+    const setPh = (id,has)=>{const el=document.getElementById(id); if(el&&has) el.placeholder='•••••• gespeichert (leer lassen = unveraendert)';};
+    setPh('sig-sec',!!b.signal?.api_secret);  setPh('sig-pass',!!b.signal?.passphrase);
+    setPh('grd-sec',!!b.grid?.api_secret);    setPh('grd-pass',!!b.grid?.passphrase);
+    setPh('fnd-sec',!!b.funding?.api_secret); setPh('fnd-pass',!!b.funding?.passphrase);
+    setPh('dca-sec',!!b.dca?.api_secret);     setPh('dca-pass',!!b.dca?.passphrase);
+  }).catch(()=>{});
 }
 
 async function saveSettings() {
@@ -6395,7 +6403,14 @@ class Handler(BaseHTTPRequestHandler):
             for bid in ("signal","grid","funding","dca"):
                 bd = data.get("bots",{}).get(bid,{})
                 for k, v in bd.items():
-                    if k in cfg["bots"][bid]: cfg["bots"][bid][k] = v
+                    if k not in cfg["bots"][bid]:
+                        continue
+                    # Key/Secret/Passphrase nur ueberschreiben, wenn wirklich ein Wert kam -
+                    # ein leeres Feld (z.B. nach Seiten-Reload) darf gespeicherte Keys NICHT
+                    # loeschen. So muss man beim Update nicht alles neu eintippen.
+                    if k in ("api_key", "api_secret", "passphrase") and not v:
+                        continue
+                    cfg["bots"][bid][k] = v
             save_config(cfg)
             _macro_cache["ts"] = 0
             # Re-init telegram if keys changed
