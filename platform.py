@@ -5918,7 +5918,6 @@ function fillSettingsForm(state) {
     document.getElementById('cfg-dash-pass').value   = '';
     document.getElementById('cfg-finnhub').value     = s(cfg.finnhub_key);
     document.getElementById('cfg-coinalyze').value   = s(cfg.coinalyze_key);
-    document.getElementById('cfg-cryptopanic').value = s(cfg.cryptopanic_key);
     document.getElementById('cfg-tg-token').value    = s(cfg.telegram_token);
     document.getElementById('cfg-tg-chat').value     = s(cfg.telegram_chat_id);
     document.getElementById('cfg-discord-wh').value  = s(cfg.discord_webhook||'');
@@ -5968,7 +5967,7 @@ function fillSettingsForm(state) {
     setPh('sig-sec',!!b.signal?.api_secret);  setPh('sig-pass',!!b.signal?.passphrase);
     setPh('grd-sec',!!b.grid?.api_secret);    setPh('grd-pass',!!b.grid?.passphrase);
     setPh('dca-sec',!!b.dca?.api_secret);     setPh('dca-pass',!!b.dca?.passphrase);
-  }).catch(()=>{});
+  }).catch(e=>console.error('fillSettingsForm:', e));  // nicht mehr still verschlucken
 }
 
 async function saveSettings() {
@@ -5980,7 +5979,6 @@ async function saveSettings() {
     dashboard_password: val('cfg-dash-pass'),
     finnhub_key:     val('cfg-finnhub'),
     coinalyze_key:   val('cfg-coinalyze'),
-    cryptopanic_key: val('cfg-cryptopanic'),
     telegram_token:  val('cfg-tg-token'),
     telegram_chat_id:val('cfg-tg-chat'),
     discord_webhook: val('cfg-discord-wh') || '',
