@@ -104,13 +104,11 @@ Erste Härtung / Sicherheitsüberprüfung:
 
 ## Was die Plattform kann
 
-Betreibt bis zu 4 automatisierte Trading‑Bots gleichzeitig, jeder auf seinem eigenen Bitget‑Sub‑Account, gesteuert über ein lokales, mit Login gesichertes Browser‑Dashboard. Unterstützt sowohl Demo‑ (Paper Trading) als auch Live‑Trading.
+Betreibt bis zu 3 automatisierte Trading‑Bots gleichzeitig, jeder auf seinem eigenen Bitget‑Sub‑Account, gesteuert über ein lokales, mit Login gesichertes Browser‑Dashboard. Unterstützt sowohl Demo‑ (Paper Trading) als auch Live‑Trading.
 
 **Signal Bot** – Technische Analyse über mehrere Tokens hinweg. Bewertet 9 Indikatoren und eröffnet Long/Short‑Positionen, wenn die Schwelle erreicht ist, mit ATR‑basiertem Stop‑Loss/Take‑Profit.
 
 **Grid Bot** – Platziert ein Raster aus Buy/Sell‑Orders über eine Preisspanne und schließt, was er tatsächlich gekauft hat. Profitiert von Seitwärtsmärkten. Unterstützt mehrere unabhängige Grid‑Instanzen.
-
-**Funding Bot** – Reines Monitoring: verfolgt Funding‑Rate‑Opportunities über mehrere Tokens und schätzt den möglichen delta‑neutralen Ertrag. Platziert keine echten Orders.
 
 **DCA Bot** – Dollar‑Cost‑Averaging auf dem Bitget‑Spot‑Markt. Kauft einen festen Betrag in regelmäßigen Intervallen.
 
@@ -135,7 +133,7 @@ Betreibt bis zu 4 automatisierte Trading‑Bots gleichzeitig, jeder auf seinem e
 ### Dashboard
 - Login‑geschützt (HTTP Basic Auth) – geführte Einrichtung beim ersten Start, änderbar in den Settings
 - Echtzeit‑Übersicht mit Fear & Greed‑Verlauf (30 Tage)
-- Pro‑Bot PnL‑Sparklines und Status (Funding‑Bot‑Schätzung separat ausgewiesen, aus der echten Summe ausgeschlossen)
+- Pro‑Bot PnL‑Sparklines und Status; die Gesamt‑Balance wird bei Bots, die sich ein Konto teilen, nicht doppelt gezählt
 - Offene Positionen über alle Sub‑Accounts hinweg
 - Markt‑Tab: Live‑Preise für 15+ Coins
 - Wirtschaftskalender mit Finnhub
@@ -343,4 +341,4 @@ client.place_order(...)   # Eine Market‑Order platzieren
 client.set_leverage(...)  # Hebel für ein Symbol setzen
 ```
 
-Sobald diese für eine neue Exchange implementiert sind, funktionieren alle vier Bots ohne weitere Änderungen.
+Sobald diese für eine neue Exchange implementiert sind, funktionieren alle Bots ohne weitere Änderungen.

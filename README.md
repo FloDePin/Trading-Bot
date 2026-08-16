@@ -104,13 +104,11 @@ Initial hardening / security review:
 
 ## What the platform can do
 
-Runs up to 4 automated trading bots simultaneously, each on its own Bitget sub-account, controlled through a local, login-protected browser dashboard. Supports both demo (paper trading) and live trading.
+Runs up to 3 automated trading bots simultaneously, each on its own Bitget sub-account, controlled through a local, login-protected browser dashboard. Supports both demo (paper trading) and live trading.
 
 **Signal Bot** – Technical analysis across multiple tokens. Scores 9 indicators and opens long/short positions when the threshold is reached, with ATR-based stop loss/take profit.
 
 **Grid Bot** – Places a grid of buy/sell orders across a price range and closes what it actually bought. Profits from sideways markets. Supports multiple independent grid instances.
-
-**Funding Bot** – Monitoring only: tracks funding-rate opportunities across multiple tokens and estimates the potential delta-neutral yield. Places no real orders.
 
 **DCA Bot** – Dollar-cost averaging on the Bitget spot market. Buys a fixed amount at regular intervals.
 
@@ -135,7 +133,7 @@ Runs up to 4 automated trading bots simultaneously, each on its own Bitget sub-a
 ### Dashboard
 - Login-protected (HTTP Basic Auth) – guided setup on first start, changeable in Settings
 - Real-time overview with Fear & Greed history (30 days)
-- Per-bot PnL sparklines and status (Funding Bot estimate shown separately, excluded from the real total)
+- Per-bot PnL sparklines and status; total balance is de-duplicated across bots that share an account
 - Open positions across all sub-accounts
 - Market tab: live prices for 15+ coins
 - Economic calendar with Finnhub
@@ -343,4 +341,4 @@ client.place_order(...)   # Place a market order
 client.set_leverage(...)  # Set leverage for a symbol
 ```
 
-Once these are implemented for a new exchange, all four bots work without any further changes.
+Once these are implemented for a new exchange, all bots work without any further changes.

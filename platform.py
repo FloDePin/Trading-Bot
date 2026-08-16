@@ -180,13 +180,6 @@ DEFAULT_CONFIG = {
             "symbol": "BTCUSDT", "upper_price": 0.0, "lower_price": 0.0,
             "grid_count": 10, "investment": 100.0, "check_interval": 10,
         },
-        "funding": {
-            "name": "Funding Bot", "enabled": False, "autostart": False,
-            "api_key": "", "api_secret": "", "passphrase": "",
-            "watch": ["SOLUSDT","ETHUSDT","XRPUSDT","DOGEUSDT","BTCUSDT"],
-            "min_funding_rate": 0.0003, "max_position_usdt": 200.0,
-            "check_interval": 60,
-        },
         "dca": {
             "name": "DCA Bot", "enabled": False, "autostart": False,
             "api_key": "", "api_secret": "", "passphrase": "",
@@ -1259,7 +1252,7 @@ def fetch_all_trades(limit=100):
     cfg       = load_config()
     live      = cfg.get("live_mode", False)
     all_fills = []
-    for bot_id in ("signal","grid","funding","dca"):
+    for bot_id in ("signal","grid","dca"):
         bc = cfg["bots"].get(bot_id, {})
         if not bc.get("api_key") or not bc.get("api_secret"): continue
         try:
@@ -1302,7 +1295,7 @@ def fetch_all_positions():
     cfg      = load_config()
     live     = cfg.get("live_mode", False)
     all_pos  = []
-    for bot_id in ("signal","grid","funding","dca"):
+    for bot_id in ("signal","grid","dca"):
         bc = cfg["bots"].get(bot_id, {})
         if not bc.get("api_key") or not bc.get("api_secret"): continue
         try:
@@ -1607,9 +1600,8 @@ def alert_check_thread():
                     elif atype == "pnl_below":
                         val = float(a.get("value", -50))
                         with plock:
-                            # Funding Bot handelt nicht real - Schaetzung zaehlt nicht in den Alert
                             total = sum(pstate["bots"][b].get("pnl",0)
-                                        for b in pstate["bots"] if b != "funding")
+                                        for b in pstate["bots"])
                             # Multi-Grid-Instanzen mit einrechnen (eigene Threads/Sub-Accounts)
                             total += sum(g.get("pnl",0) for g in pstate.get("grid_instances", {}).values())
                         if total < val and not a.get("triggered"):
@@ -1722,8 +1714,6 @@ pstate = {
         "grid":    {"status":"STOPPED","balance":0.0,"start_bal":0.0,"pnl":0.0,
                     "trade_count":0,"filled":0,"logs":[],"grid_orders":[],
                     "symbol":"","upper":0,"lower":0,"last_update":""},
-        "funding": {"status":"STOPPED","balance":0.0,"start_bal":0.0,"pnl":0.0,
-                    "earned":0.0,"logs":[],"rates":{},"opportunities":[],"last_update":""},
         "dca":     {"status":"STOPPED","balance":0.0,"start_bal":0.0,"pnl":0.0,
                     "invested":0.0,"buys":0,"avg_price":0.0,"next_buy":"","logs":[],"last_update":""},
     },
@@ -2445,66 +2435,6 @@ def stop_grid_instance(inst_id):
     return True, "Stoppbefehl gesendet"
 
 # ─────────────────────────────────────────────
-#  FUNDING BOT
-# ─────────────────────────────────────────────
-def run_funding(flag):
-    cfg    = load_config()
-    bc     = cfg["bots"]["funding"]
-    client = BitgetClient(bc["api_key"], bc["api_secret"], bc["passphrase"],
-                          cfg.get("live_mode", False))
-    watch  = bc.get("watch",["SOLUSDT","ETHUSDT","XRPUSDT","DOGEUSDT","BTCUSDT"])
-    min_fr = float(bc.get("min_funding_rate",0.0003))
-    max_p  = float(bc.get("max_position_usdt",200))
-    check  = int(bc.get("check_interval",60))
-
-    start_bal = client.balance(retries=5)
-    total_earned = 0.0
-
-    with plock:
-        pstate["bots"]["funding"].update({
-            "status":"RUNNING","balance":start_bal,"start_bal":start_bal})
-    blog("funding",f"Aktiv | Min FR: {min_fr*100:.4f}% | Max: {max_p} USDT | "
-                   f"HINWEIS: Beobachtungs-Modus, dieser Bot platziert KEINE echten Orders. "
-                   f"'Verdient' ist eine Schaetzung.","WARN")
-
-    while not flag["stop"]:
-        try:
-            rates = {}
-            opps  = []
-            for sym in watch:
-                fr = client.funding_rate(sym)
-                cur = sym.replace("USDT","")
-                rates[cur] = round(fr * 100, 6)
-                if abs(fr) >= min_fr:
-                    est_8h = abs(fr) * max_p
-                    direction = "Short Futures / Long Spot" if fr > 0 else "Long Futures / Short Spot"
-                    opps.append({
-                        "symbol": cur, "rate": round(fr*100,4),
-                        "est_8h": round(est_8h,4), "direction": direction,
-                    })
-                    total_earned += est_8h * (check / 28800)
-                    blog("funding",f"{cur}: FR={fr*100:.4f}% → {direction} | ~{est_8h:.4f} USDT/8h")
-                time.sleep(0.2)
-
-            bal = client.balance(retries=2) or start_bal
-            with plock:
-                pstate["bots"]["funding"].update({
-                    "balance":round(bal,2),"rates":rates,
-                    "opportunities":opps,"earned":round(total_earned,4),
-                    "pnl":round(total_earned,4),
-                    "last_update":datetime.now().strftime("%H:%M:%S"),
-                })
-        except Exception as e:
-            blog("funding",f"Loop: {e}","ERROR")
-        time.sleep(check)
-
-    with plock:
-        pstate["bots"]["funding"]["status"] = "STOPPED"
-        pstate["bots"]["funding"]["earned"]  = 0.0
-        pstate["bots"]["funding"]["pnl"]     = 0.0
-    blog("funding","Gestoppt.")
-
-# ─────────────────────────────────────────────
 #  DCA BOT
 # ─────────────────────────────────────────────
 def run_dca(flag):
@@ -2624,7 +2554,7 @@ def emergency_stop():
     notify("[NOTFALL-STOPP] Alle Positionen werden geschlossen.", True)
 
     # Alle Bot-Threads stoppen
-    for bid in ("signal","grid","funding","dca"):
+    for bid in ("signal","grid","dca"):
         if bid in bot_flags:
             bot_flags[bid]["stop"] = True
         with plock:
@@ -2640,7 +2570,7 @@ def emergency_stop():
     live = cfg.get("live_mode", False)
     closed, errors = 0, 0
 
-    for bid in ("signal","grid","funding","dca"):
+    for bid in ("signal","grid","dca"):
         bc = cfg["bots"].get(bid, {})
         if not bc.get("api_key") or not bc.get("api_secret"):
             continue
@@ -2689,11 +2619,7 @@ def daily_summary_thread():
 
             with plock:
                 bots = pstate["bots"]
-                # Funding Bot fuehrt keine echten Trades aus (reine Rate-Beobachtung) -
-                # sein "pnl" ist eine Schaetzung und wird aus der echten Gesamt-PnL ausgeschlossen.
-                real_bots = [b for b in bots if b != "funding"]
-                total_pnl = sum(bots[b].get("pnl",0) for b in real_bots)
-                funding_est = bots.get("funding",{}).get("pnl",0)
+                total_pnl = sum(bots[b].get("pnl",0) for b in bots)
                 active    = sum(1 for b in bots if bots[b].get("status")=="RUNNING")
                 trades    = sum(bots[b].get("trade_count",0) for b in bots)
                 # Multi-Grid-Instanzen mit einrechnen (eigene Threads/Sub-Accounts)
@@ -2711,7 +2637,6 @@ def daily_summary_thread():
                 f"Modus: {'LIVE' if pstate.get('live_mode') else 'DEMO'}\n"
                 f"PnL gesamt (Signal/Grid/DCA + Instanzen): {total_pnl:+.2f} USDT\n"
                 f"{inst_line}"
-                f"Funding Bot Schaetzung: {funding_est:+.2f} USDT (kein echter Trade)\n"
                 f"Aktive Bots/Grids: {active}\n"
                 f"Trades heute: {trades}"
             )
@@ -2722,7 +2647,7 @@ def daily_summary_thread():
 # ─────────────────────────────────────────────
 #  BOT MANAGER
 # ─────────────────────────────────────────────
-RUNNERS = {"signal":run_signal,"grid":run_grid,"funding":run_funding,"dca":run_dca}
+RUNNERS = {"signal":run_signal,"grid":run_grid,"dca":run_dca}
 
 def start_bot(bot_id):
     if bot_id not in RUNNERS: return False, "Unbekannter Bot"
@@ -2751,7 +2676,7 @@ def stop_bot(bot_id):
 #  DASHBOARD HTML
 # ─────────────────────────────────────────────
 DASHBOARD_HTML = r"""<!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -3071,9 +2996,6 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <button class="tab" data-tab="grid" data-bot="grid" onclick="switchTab('grid')">
     GRID<span class="status-dot dot-stop" id="dot-grid"></span>
   </button>
-  <button class="tab" data-tab="funding" data-bot="funding" onclick="switchTab('funding')">
-    FUNDING<span class="status-dot dot-stop" id="dot-funding"></span>
-  </button>
   <button class="tab" data-tab="dca" data-bot="dca" onclick="switchTab('dca')">
     DCA<span class="status-dot dot-stop" id="dot-dca"></span>
   </button>
@@ -3103,7 +3025,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <div class="grid g4">
     <div class="card"><div class="card-label" data-i18n="total_balance">Gesamt Balance</div>
       <div class="card-value blue" id="ov-balance">0.00</div><div class="card-sub">USDT (Demo)</div></div>
-    <div class="card"><div class="card-label" data-i18n="total_pnl_nofund">Gesamt PnL (ohne Funding)</div>
+    <div class="card"><div class="card-label" data-i18n="total_pnl_nofund">Gesamt PnL</div>
       <div class="card-value" id="ov-pnl">+0.00</div><div class="card-sub" id="ov-pnlpct">0.00%</div></div>
     <div class="card"><div class="card-label" data-i18n="active_bots">Aktive Bots</div>
       <div class="card-value white" id="ov-active">0 / 4</div><div class="card-sub" data-i18n="running_total">Laufen / Gesamt</div></div>
@@ -3168,7 +3090,6 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <option value="all">Alle Bots</option>
         <option value="signal">Signal Bot</option>
         <option value="grid">Grid Bot</option>
-        <option value="funding">Funding Bot</option>
         <option value="dca">DCA Bot</option>
       </select>
       <button onclick="loadTrades()" style="background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer" data-i18n="load">Laden</button>
@@ -3351,41 +3272,6 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
       <span data-i18n="kal_time">Zeit (UTC)</span><span data-i18n="kal_country">Land</span><span data-i18n="kal_event">Ereignis</span><span>Impact</span><span data-i18n="kal_actual">Aktuell</span><span data-i18n="kal_forecast">Prognose</span>
     </div>
     <div id="kal-rows"><div style="padding:20px;color:var(--muted);font-size:11px" data-i18n="loading_cal">Lade Kalender... (Finnhub API Key in Settings benoetigt)</div></div>
-  </div>
-</div>
-
-<!-- FUNDING BOT -->
-<div id="panel-funding" class="panel">
-  <div class="bot-header">
-    <div>
-      <div class="bot-title" style="color:var(--funding)">FUNDING BOT</div>
-      <div class="bot-meta" data-i18n="meta_funding">Beobachtungs-Modus: zeigt Funding-Rate-Opportunities, platziert aber KEINE echten Orders. "Verdient" ist eine Schaetzung.</div>
-    </div>
-    <div style="display:flex;gap:10px;align-items:center">
-      <button class="btn-help" onclick="showHelp('funding')" title="Erklaerung">?</button>
-      <span id="funding-status-badge" class="ov-status s-stopped">STOPPED</span>
-      <button class="btn btn-start" style="--accent:var(--funding)" id="funding-btn" onclick="toggleBot('funding')">START</button>
-    </div>
-  </div>
-  <div class="grid g3" style="margin-bottom:14px">
-    <div class="card"><div class="card-label" data-i18n="balance">Balance</div>
-      <div class="card-value blue" id="f-balance">0.00</div><div class="card-sub">USDT</div></div>
-    <div class="card"><div class="card-label" data-i18n="earned">Verdient (est.)</div>
-      <div class="card-value green" id="f-earned">0.0000</div><div class="card-sub" data-i18n="usdt_funding">USDT Funding</div></div>
-    <div class="card"><div class="card-label" data-i18n="opportunities">Opportunities</div>
-      <div class="card-value white" id="f-opps">0</div><div class="card-sub" data-i18n="over_thresh">Ueber Schwelle</div></div>
-  </div>
-  <div class="pnl-card">
-    <div class="pnl-card-label"><span data-i18n="funding_cum">Kumulierter Funding-Ertrag</span><span id="f-trend" class="trend-flat">- -</span></div>
-    <svg class="spark" id="f-spark" viewBox="0 0 400 40" preserveAspectRatio="none"></svg>
-  </div>
-  <div class="rate-table">
-    <div class="rt-head"><span>Symbol</span><span>Funding Rate</span><span>Est. / 8h</span><span class="rt-col-dir" data-i18n="strategy">Strategie</span></div>
-    <div id="f-rates"></div>
-  </div>
-  <div class="log-wrap">
-    <div class="log-head"><span>Funding Bot Log</span><span id="f-logcount"></span></div>
-    <div class="log-body" id="f-log"></div>
   </div>
 </div>
 
@@ -3702,9 +3588,9 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
           Presets fuellen die Signal- und Grid-Bot-Felder automatisch aus. Danach noch API Keys eintragen.
         </div>
         <div class="preset-wrap">
-          <button class="preset-btn low" onclick="applyPreset('low')">🟢 LOW RISK</button>
-          <button class="preset-btn med" onclick="applyPreset('medium')">🔵 MEDIUM RISK</button>
-          <button class="preset-btn degen" onclick="applyPreset('degen')">🔴 DEGEN</button>
+          <button class="preset-btn low" onclick="applyPreset('low')" data-i18n="preset_low">🟢 LOW RISK</button>
+          <button class="preset-btn med" onclick="applyPreset('medium')" data-i18n="preset_med">🔵 MEDIUM RISK</button>
+          <button class="preset-btn degen" onclick="applyPreset('degen')" data-i18n="preset_high">🔴 HIGH RISK</button>
         </div>
         <div id="preset-desc" style="font-size:10px;color:var(--muted);min-height:16px"></div>
       </div>
@@ -3851,29 +3737,6 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
       </div>
     </div>
 
-    <!-- FUNDING BOT -->
-    <div class="settings-section">
-      <div class="settings-head" onclick="toggle('s-funding')" style="color:var(--funding)"><span>Funding Bot – Sub-Account API</span><span style="color:var(--muted)">▾</span></div>
-      <div id="s-funding" class="settings-body">
-        <div class="preset-wrap" style="margin-bottom:12px">
-          <span style="font-size:10px;color:var(--muted);margin-right:6px" data-i18n="set_preset">Preset:</span>
-          <button class="preset-btn low"   onclick="applyBotPreset('funding','low')" data-i18n="bp_cons">KONSERVATIV</button>
-          <button class="preset-btn med"   onclick="applyBotPreset('funding','medium')" data-i18n="bp_std">STANDARD</button>
-          <button class="preset-btn degen" onclick="applyBotPreset('funding','high')" data-i18n="bp_agg">AGGRESSIV</button>
-        </div>
-        <div class="field-row"><label>API Key</label><input type="text" id="fnd-key" placeholder="Bitget API Key"></div>
-        <div class="field-row"><label>API Secret</label><input type="password" id="fnd-sec" placeholder="Bitget API Secret"></div>
-        <div class="field-row"><label>Passphrase</label><input type="password" id="fnd-pass" placeholder="Bitget Passphrase"></div>
-        <div class="field-row"><label data-i18n="lbl_autostart">Auto-Start nach Neustart</label><input type="checkbox" id="fnd-autostart" style="width:auto"></div>
-        <div class="field-row"><label data-i18n="lbl_min_funding">Min. Funding Rate (%)</label><input type="number" id="fnd-minrate" placeholder="0.03" step="0.001"></div>
-        <div class="field-row"><label data-i18n="lbl_max_pos">Max. Position (USDT)</label><input type="number" id="fnd-maxpos" placeholder="200" min="10"></div>
-        <div class="validate-row">
-          <button class="btn-validate" onclick="validateKey('funding')">Verbindung testen</button>
-          <span class="val-result" id="val-funding"></span>
-        </div>
-      </div>
-    </div>
-
     <!-- DCA BOT -->
     <div class="settings-section">
       <div class="settings-head" onclick="toggle('s-dca')" style="color:var(--dca)"><span>DCA Bot – Sub-Account API</span><span style="color:var(--muted)">▾</span></div>
@@ -3941,8 +3804,8 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
 </div>
 
 <script>
-const BOT_COLORS = {signal:'#00d68f',grid:'#4da6ff',funding:'#a78bfa',dca:'#fbbf24'};
-const BOT_NAMES  = {signal:'Signal Bot',grid:'Grid Bot',funding:'Funding Bot',dca:'DCA Bot'};
+const BOT_COLORS = {signal:'#00d68f',grid:'#4da6ff',dca:'#fbbf24'};
+const BOT_NAMES  = {signal:'Signal Bot',grid:'Grid Bot',dca:'DCA Bot'};
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({
@@ -3951,13 +3814,13 @@ function esc(s) {
 }
 
 // -- SPRACHE / LANGUAGE ---------------------------------------
-let _lang = (typeof localStorage !== 'undefined' && localStorage.getItem('tp_lang')) || 'de';
+let _lang = (typeof localStorage !== 'undefined' && localStorage.getItem('tp_lang')) || 'en';
 
 const STRINGS = {
   de: {
     // Nav
     nav_overview:'OVERVIEW', nav_signal:'SIGNAL', nav_grid:'GRID',
-    nav_funding:'FUNDING', nav_dca:'DCA', nav_markt:'MARKT',
+    nav_dca:'DCA', nav_markt:'MARKT',
     nav_trades:'TRADES',
     nav_backtest:'BACKTEST', nav_correlation:'KORRELATION', nav_derivate:'DERIVATE', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
     // Korrelation
@@ -3984,7 +3847,7 @@ const STRINGS = {
     // Card labels
     balance:'Balance', total_balance:'Gesamt Balance',
     total_pnl:'Gesamt PnL', active_bots:'Aktive Bots',
-    total_pnl_nofund:'Gesamt PnL (ohne Funding)', running_total:'Laufen / Gesamt',
+    total_pnl_nofund:'Gesamt PnL', running_total:'Laufen / Gesamt',
     all_bots:'Alle Bots', th_action:'Aktion', no_finnhub:'Kein Finnhub Key gesetzt',
     pos_side:'Seite', pos_size:'Groesse', pos_entry:'Einstieg', pos_lev:'Hebel',
     pnl_history:'PnL-Verlauf', no_blackout:'Kein Blackout', grid_profits:'Grid-Gewinne',
@@ -4056,6 +3919,10 @@ const STRINGS = {
     ph_tg_chat:'Deine Chat-ID (z.B. 123456789)',
     set_notify_note:'Telegram: @BotFather → /newbot → Token. Chat-ID von @userinfobot.<br>Discord: Server-Einstellungen → Integrationen → Webhooks → URL kopieren.<br>Beide koennen gleichzeitig aktiv sein. News-Sentiment: CoinGecko (kostenlos, kein Key).',
     set_preset:'Preset:', bp_cons:'KONSERVATIV', bp_std:'STANDARD', bp_agg:'AGGRESSIV',
+    preset_low:'🟢 GERINGES RISIKO', preset_med:'🔵 MITTLERES RISIKO', preset_high:'🔴 HOHES RISIKO',
+    preset_desc_low:'GERINGES RISIKO: Hebel 1x, enger SL 0.5%, nur starke Signale (Schwelle 4), kleines Grid.',
+    preset_desc_medium:'MITTLERES RISIKO: Standard-Werte. Hebel 3x, SL 1%, Schwelle 3, Grid 10 Levels.',
+    preset_desc_degen:'HOHES RISIKO: Hebel 5x, weiter SL 2%, niedrige Schwelle 2 (mehr Trades, mehr Risiko).',
     lbl_risk_trade:'Risiko pro Trade (%)', lbl_usdt_trade:'USDT pro Trade (fallback)', lbl_budget:'Budget (USDT)',
     lbl_autostart:'Auto-Start nach Neustart',
     lbl_max_conc:'Max. gleichzeitige Pos.', lbl_corr_filter:'Korrelations-Filter', lbl_max_corr:'Max. Korrelation (0.5-1.0)',
@@ -4097,7 +3964,7 @@ const STRINGS = {
   },
   en: {
     nav_overview:'OVERVIEW', nav_signal:'SIGNAL', nav_grid:'GRID',
-    nav_funding:'FUNDING', nav_dca:'DCA', nav_markt:'MARKET',
+    nav_dca:'DCA', nav_markt:'MARKET',
     nav_trades:'TRADES',
     nav_backtest:'BACKTEST', nav_correlation:'CORRELATION', nav_derivate:'DERIVATIVES', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
     corr_title:'CORRELATION MATRIX', corr_period:'Period', corr_refresh:'Refresh',
@@ -4119,7 +3986,7 @@ const STRINGS = {
     panic:'ALL STOP & CLOSE',
     balance:'Balance', total_balance:'Total Balance',
     total_pnl:'Total PnL', active_bots:'Active Bots',
-    total_pnl_nofund:'Total PnL (excl. Funding)', running_total:'Running / Total',
+    total_pnl_nofund:'Total PnL', running_total:'Running / Total',
     all_bots:'All bots', th_action:'Action', no_finnhub:'No Finnhub key set',
     pos_side:'Side', pos_size:'Size', pos_entry:'Entry', pos_lev:'Leverage',
     pnl_history:'PnL history', no_blackout:'No blackout', grid_profits:'Grid profits',
@@ -4187,6 +4054,10 @@ const STRINGS = {
     ph_tg_chat:'Your chat ID (e.g. 123456789)',
     set_notify_note:'Telegram: @BotFather → /newbot → token. Chat ID from @userinfobot.<br>Discord: Server settings → Integrations → Webhooks → copy URL.<br>Both can be active at once. News sentiment: CoinGecko (free, no key).',
     set_preset:'Preset:', bp_cons:'CONSERVATIVE', bp_std:'STANDARD', bp_agg:'AGGRESSIVE',
+    preset_low:'🟢 LOW RISK', preset_med:'🔵 MEDIUM RISK', preset_high:'🔴 HIGH RISK',
+    preset_desc_low:'LOW RISK: 1x leverage, tight 0.5% SL, only strong signals (threshold 4), small grid.',
+    preset_desc_medium:'MEDIUM RISK: standard values. 3x leverage, 1% SL, threshold 3, 10-level grid.',
+    preset_desc_degen:'HIGH RISK: 5x leverage, wider 2% SL, low threshold 2 (more trades, more risk).',
     lbl_risk_trade:'Risk per trade (%)', lbl_usdt_trade:'USDT per trade (fallback)', lbl_budget:'Budget (USDT)',
     lbl_autostart:'Auto-start after reboot',
     lbl_max_conc:'Max simultaneous pos.', lbl_corr_filter:'Correlation filter', lbl_max_corr:'Max correlation (0.5-1.0)',
@@ -4361,7 +4232,7 @@ function applyLang() {
   // Nav tabs
   const tabMap = {
     overview:'nav_overview', signal:'nav_signal', grid:'nav_grid',
-    funding:'nav_funding', dca:'nav_dca', markt:'nav_markt',
+    dca:'nav_dca', markt:'nav_markt',
     trades:'nav_trades',
     backtest:'nav_backtest', correlation:'nav_correlation', derivate:'nav_derivate', alerts:'nav_alerts', settings:'nav_settings',
   };
@@ -4393,11 +4264,11 @@ function applyLang() {
 }
 
 
-const pnlHistory = {signal:[],grid:[],funding:[],dca:[]};
+const pnlHistory = {signal:[],grid:[],dca:[]};
 const MAX_PTS = 80;
 
 function trackPnl(state) {
-  ['signal','grid','funding','dca'].forEach(id => {
+  ['signal','grid','dca'].forEach(id => {
     const v = parseFloat(state.bots[id]?.pnl || 0);
     pnlHistory[id].push(v);
     if (pnlHistory[id].length > MAX_PTS) pnlHistory[id].shift();
@@ -4434,7 +4305,6 @@ function sparkline(id, data) {
 function updateSparklines() {
   sparkline('s-spark', pnlHistory.signal);
   sparkline('g-spark', pnlHistory.grid);
-  sparkline('f-spark', pnlHistory.funding);
   sparkline('d-spark', pnlHistory.dca);
 }
 
@@ -4505,7 +4375,7 @@ const PRESETS = {
 function applyPreset(id) {
   const p = PRESETS[id];
   if (!p) return;
-  document.getElementById('preset-desc').textContent = p.desc;
+  document.getElementById('preset-desc').textContent = t('preset_desc_'+id);
   // Signal Bot
   if (p.signal) {
     document.getElementById('sig-lever').value  = p.signal.lever;
@@ -4527,7 +4397,6 @@ async function validateKey(botId) {
   const keys = {
     signal:  {key:'sig-key',  sec:'sig-sec',  pass:'sig-pass'},
     grid:    {key:'grd-key',  sec:'grd-sec',  pass:'grd-pass'},
-    funding: {key:'fnd-key',  sec:'fnd-sec',  pass:'fnd-pass'},
     dca:     {key:'dca-key',  sec:'dca-sec',  pass:'dca-pass'},
   };
   const ids    = keys[botId];
@@ -4725,40 +4594,6 @@ const HELP = {
       },
     ]
   },
-  funding: {
-    title: 'FUNDING BOT',
-    sub: 'Delta-neutrale Strategie - verdient die Funding Rate ohne Preisrisiko',
-    accent: '#a78bfa',
-    sections: [
-      {
-        title: 'Risiko & Rendite',
-        table: [
-          ['Risikostufe', '[NIEDRIG] NIEDRIG (bei korrekter Ausfuehrung)'],
-          ['Gutes Jahr', '20 - 50% p.a. auf eingesetztes Kapital in aktiven Bullmaerkten'],
-          ['Durchschnittsjahr', '10 - 25% p.a. ueber verschiedene Marktphasen'],
-          ['Schlechtes Jahr', '2 - 8% p.a. wenn Funding Rates dauerhaft niedrig sind'],
-          ['Wichtig', 'Funding Rates sind variabel. In Baermaerkten koennen sie negativ werden - dann muss man die Seite wechseln oder pausieren'],
-          ['Restrisiko', 'Exchange-Gegenparteirisiko bleibt immer. Kapital liegt auf der Boerse.'],
-        ]
-      },
-      {
-        title: 'Was ist die Funding Rate?',
-        text: 'Auf Futures-Boersen gibt es alle 8 Stunden eine Zahlung zwischen Long- und Short-Haltern. Ist mehr Nachfrage nach Longs als Shorts, zahlen Long-Trader an Short-Trader (positive Rate). In Bullmaerkten kann diese Rate 0.05% - 0.3% alle 8h betragen - das entspricht 20% - 130% annualisiert.'
-      },
-      {
-        title: 'Wie verdient der Bot?',
-        text: 'Der Bot nimmt eine delta-neutrale Position ein: Short auf Futures und Long auf Spot gleichzeitig. Die Positionen heben sich im Preis gegenseitig auf - egal ob BTC steigt oder faellt, das Gesamtkapital bleibt stabil. Was uebrig bleibt, ist die Funding Rate als reiner Ertrag alle 8 Stunden.'
-      },
-      {
-        title: 'Rate-Tabelle erklaert',
-        table: [
-          ['Funding Rate', 'Aktuelle Rate in %. Positiv = Longs zahlen an Shorts (Bot nimmt Short-Seite)'],
-          ['Est. / 8h', 'Geschaetzter Ertrag alle 8h bei konfigurierter Max-Position in USDT'],
-          ['Unter Schwelle', 'Rate zu niedrig - nach Handelsgebuehren kein Gewinn moeglich'],
-        ]
-      },
-    ]
-  },
   dca: {
     title: 'DCA BOT',
     sub: 'Dollar-Cost-Averaging - regelmaessiges Kaufen auf dem Spot-Markt',
@@ -4824,7 +4659,7 @@ const HELP = {
          ['Preis UEBER','Sendet Alarm wenn der Coin-Preis einen bestimmten Wert ueberschreitet.'],
          ['Preis UNTER','Sendet Alarm wenn der Coin-Preis unter einen bestimmten Wert faellt.'],
          ['PnL unter Wert','Alarm wenn der Gesamt-PnL aller Bots einen negativen Schwellwert unterschreitet.'],
-         ['Funding Rate','Alarm wenn die Funding Rate eines Coins eine bestimmte Schwelle ueberschreitet (Opportunity-Alert fuer Funding Bot).'],
+         ['Funding Rate','Alarm wenn die Funding Rate eines Coins eine bestimmte Schwelle ueberschreitet (nutzt die oeffentliche Funding-Rate, kein Bot noetig).'],
        ]},
       {title:'Voraussetzung',
        text:'Telegram Token und Chat-ID muessen unter Settings konfiguriert sein, sonst werden die Nachrichten nicht zugestellt.'},
@@ -4839,7 +4674,6 @@ const HELP = {
         table: [
           ['Signal Bot', '[MITTEL-HOCH] Mittel-Hoch | 0-35% p.a. | Trend-Maerkte'],
           ['Grid Bot', '[NIEDRIG] Niedrig-Mittel | 8-40% p.a. | Seitwaetstmaerkte'],
-          ['Funding Bot', '[NIEDRIG] Niedrig | 10-50% p.a. | Jeder Markt (wenn Rate hoch)'],
           ['DCA Bot', '[NIEDRIG] Niedrig | 20-50% p.a. | Langfristig, 3-5 Jahre'],
         ]
       },
@@ -5739,11 +5573,6 @@ const BOT_PRESETS={
     medium:{n:10,inv:100},
     high:{n:20,inv:300},
   },
-  funding:{
-    low:{minrate:0.0005,maxpos:100},
-    medium:{minrate:0.0003,maxpos:200},
-    high:{minrate:0.0001,maxpos:500},
-  },
   dca:{
     low:{hrs:168,amt:20},
     medium:{hrs:24,amt:30},
@@ -5756,7 +5585,6 @@ function applyBotPreset(botId,level) {
   const set=(id,v)=>{const el=document.getElementById(id);if(el&&v!==undefined)el.value=v;};
   if(botId==='signal'){set('sig-lever',p.lever);set('sig-usdt',p.usdt);set('sig-thresh',p.thresh);}
   else if(botId==='grid'){set('grd-n',p.n);set('grd-inv',p.inv);}
-  else if(botId==='funding'){set('fnd-minrate',p.minrate);set('fnd-maxpos',p.maxpos);}
   else if(botId==='dca'){set('dca-hrs',p.hrs);set('dca-amt',p.amt);}
   const labels={low:'Konservativ',medium:'Standard',high:'Aggressiv'};
   const desc=document.getElementById('preset-desc');
@@ -5905,7 +5733,7 @@ function update(state) {
   document.body.className = live ? 'live-mode' : 'demo-mode';
 
   // Dots
-  ['signal','grid','funding','dca'].forEach(id => {
+  ['signal','grid','dca'].forEach(id => {
     const st = state.bots[id]?.status || 'STOPPED';
     const dot = document.getElementById('dot-' + id);
     if (dot) dot.className = 'status-dot ' + dotClass(st);
@@ -5913,21 +5741,21 @@ function update(state) {
 
   // OVERVIEW
   let totalBal = 0, totalPnl = 0, activeCount = 0, totalTrades = 0;
-  const rows = ['signal','grid','funding','dca'].map(id => {
+  const rows = ['signal','grid','dca'].map(id => {
     const b = state.bots[id] || {};
     const bal = parseFloat(b.balance||0);
     const pnl = parseFloat(b.pnl||0);
     const st  = b.status || 'STOPPED';
     if (st === 'RUNNING') activeCount++;
     totalBal    += bal;
-    if (id !== 'funding') totalPnl += pnl; // Funding Bot handelt nicht real, Schaetzung zaehlt nicht in den echten Gesamt-PnL
+    totalPnl    += pnl;
     totalTrades += parseInt(b.trade_count||0);
     return `<div class="ov-row">
       <span class="ov-bot-name" style="color:${BOT_COLORS[id]}">${BOT_NAMES[id]}</span>
       <span><span class="ov-status ${statusClass(st)}">${st}</span></span>
       <span class="blue">${bal.toFixed(2)}</span>
-      <span class="${pnlColor(pnl)}">${(pnl>=0?'+':'')+pnl.toFixed(2)}${id==='funding'?` <span style="font-size:9px;color:var(--muted);cursor:help" title="Funding-Ertrag wird nur akkumuliert wenn Bot laeuft.">${st==='RUNNING'?'[est.]':'[inaktiv]'}</span>`:''}</span>
-      <span style="color:var(--muted)">${id==='funding'? (b.trade_count||0)+' Zahl.' : (b.trade_count||0)+' Trades'}</span>
+      <span class="${pnlColor(pnl)}">${(pnl>=0?'+':'')+pnl.toFixed(2)}</span>
+      <span style="color:var(--muted)">${(b.trade_count||0)+' Trades'}</span>
       <span>
         <button class="btn ${st==='RUNNING'?'btn-stop':'btn-start'}"
           style="--accent:${BOT_COLORS[id]};padding:5px 12px"
@@ -5939,9 +5767,13 @@ function update(state) {
   const pnlEl = document.getElementById('ov-pnl');
   pnlEl.textContent = (totalPnl>=0?'+':'')+totalPnl.toFixed(2);
   pnlEl.className = 'card-value ' + pnlColor(totalPnl);
-  document.getElementById('ov-balance').textContent = totalBal.toFixed(2);
+  // Balance: mehrere Bots koennen denselben Account (gleicher API-Key) nutzen - dann darf
+  // der Bestand NICHT doppelt gezaehlt werden. Das Backend liefert den deduplizierten
+  // Gesamtbestand (total_balance); Fallback ist die naive Summe.
+  document.getElementById('ov-balance').textContent =
+    (state.total_balance != null ? state.total_balance : totalBal).toFixed(2);
   document.getElementById('ov-pnlpct').textContent = state.bots.signal?.pnl_pct?.toFixed(2)+'%' || '-';
-  document.getElementById('ov-active').textContent = activeCount + ' / 4';
+  document.getElementById('ov-active').textContent = activeCount + ' / 3';
   document.getElementById('ov-trades').textContent = totalTrades;
 
   // Overview macro (from signal bot)
@@ -5950,7 +5782,7 @@ function update(state) {
 
   // Combined recent log
   let allLogs = [];
-  ['signal','grid','funding','dca'].forEach(id => {
+  ['signal','grid','dca'].forEach(id => {
     (state.bots[id]?.logs||[]).slice(0,10).forEach(entry => {
       allLogs.push({...entry, bot: id});
     });
@@ -6022,36 +5854,6 @@ function update(state) {
   if (activePanel === 'grid') {
     updateTVGridLines(gg.grid_orders, gg.upper, gg.lower);
   }
-
-  // FUNDING
-  const fg2 = state.bots.funding || {};
-  updateBotHeader('funding', fg2);
-  document.getElementById('f-balance').textContent = parseFloat(fg2.balance||0).toFixed(2);
-  const earnedEl = document.getElementById('f-earned');
-  const earnedVal = parseFloat(fg2.earned||0);
-  earnedEl.textContent = earnedVal.toFixed(4);
-  // Zeige nur Wert wenn Bot wirklich laeuft
-  const fundingRunning = fg2.status === 'RUNNING';
-  earnedEl.style.color = fundingRunning && earnedVal > 0 ? 'var(--signal)' : 'var(--muted)';
-  const fundingEarnSub = document.querySelector('#f-earned + .card-sub') || document.querySelector('.card-sub');
-  const opps = fg2.opportunities || [];
-  document.getElementById('f-opps').textContent = opps.length;
-  const rates = fg2.rates || {};
-  const allSyms = ['SOL','ETH','XRP','DOGE','BTC'];
-  document.getElementById('f-rates').innerHTML = allSyms.map(sym => {
-    const r = parseFloat(rates[sym]||0);
-    const est = Math.abs(r) / 100 * parseFloat(fg2.max_position_usdt||200);
-    const rColor = r > 0.03 ? 'var(--red)' : r < -0.03 ? 'var(--signal)' : 'var(--muted)';
-    const dir = r > 0 ? 'Short F / Long S' : r < 0 ? 'Long F / Short S' : '-';
-    return `<div class="rt-row">
-      <span style="font-weight:600">${sym}</span>
-      <span style="color:${rColor}">${r.toFixed(4)}%</span>
-      <span style="color:var(--muted)">${Math.abs(r)>=0.03?est.toFixed(4):'-'} USDT</span>
-      <span style="color:${Math.abs(r)>=0.03?'var(--signal)':'var(--dim)'}">${Math.abs(r)>=0.03?dir:'Unter Schwelle'}</span>
-    </div>`;
-  }).join('');
-  document.getElementById('f-log').innerHTML = renderLog(fg2.logs||[]);
-  document.getElementById('f-logcount').textContent = (fg2.logs||[]).length + ' Eintraege';
 
   // DCA
   const dg = state.bots.dca || {};
@@ -6153,9 +5955,6 @@ function fillSettingsForm(state) {
     document.getElementById('grd-lower').value = s(b.grid?.lower_price||0);
     document.getElementById('grd-n').value     = s(b.grid?.grid_count||10);
     document.getElementById('grd-inv').value   = s(b.grid?.investment||100);
-    document.getElementById('fnd-key').value     = s(b.funding?.api_key);
-    document.getElementById('fnd-minrate').value = s(b.funding?.min_funding_rate||0.0003);
-    document.getElementById('fnd-maxpos').value  = s(b.funding?.max_position_usdt||200);
     document.getElementById('dca-key').value = s(b.dca?.api_key);
     document.getElementById('dca-sym').value = s(b.dca?.symbol||'BTCUSDT');
     document.getElementById('dca-hrs').value = s(b.dca?.interval_hours||24);
@@ -6164,12 +5963,10 @@ function fillSettingsForm(state) {
     // signalisiert, dass sie gespeichert sind - leer lassen = unveraendert (kein Neu-Eintippen).
     document.getElementById('sig-autostart').checked = (b.signal?.autostart===true);
     document.getElementById('grd-autostart').checked = (b.grid?.autostart===true);
-    document.getElementById('fnd-autostart').checked = (b.funding?.autostart===true);
     document.getElementById('dca-autostart').checked = (b.dca?.autostart===true);
     const setPh = (id,has)=>{const el=document.getElementById(id); if(el&&has) el.placeholder='•••••• gespeichert (leer lassen = unveraendert)';};
     setPh('sig-sec',!!b.signal?.api_secret);  setPh('sig-pass',!!b.signal?.passphrase);
     setPh('grd-sec',!!b.grid?.api_secret);    setPh('grd-pass',!!b.grid?.passphrase);
-    setPh('fnd-sec',!!b.funding?.api_secret); setPh('fnd-pass',!!b.funding?.passphrase);
     setPh('dca-sec',!!b.dca?.api_secret);     setPh('dca-pass',!!b.dca?.passphrase);
   }).catch(()=>{});
 }
@@ -6228,14 +6025,6 @@ async function saveSettings() {
         lower_price: num('grd-lower'),
         grid_count:  int('grd-n')     || 10,
         investment:  num('grd-inv')   || 100,
-      },
-      funding: {
-        api_key:          val('fnd-key'),
-        api_secret:       val('fnd-sec'),
-        passphrase:       val('fnd-pass'),
-        autostart:        document.getElementById('fnd-autostart')?.checked || false,
-        min_funding_rate: num('fnd-minrate') || 0.0003,
-        max_position_usdt:num('fnd-maxpos')  || 200,
       },
       dca: {
         api_key:       val('dca-key'),
@@ -6432,6 +6221,23 @@ class Handler(BaseHTTPRequestHandler):
             with plock:
                 state_copy = dict(pstate)
                 state_copy["grid_instances"] = dict(pstate.get("grid_instances",{}))
+            # Deduplizierter Gesamtbestand: mehrere Bots koennen denselben Account teilen
+            # (gleicher API-Key) - dann darf der Bestand nur EINMAL zaehlen. Pro einzigartigem
+            # API-Key eine Balance addieren (Haupt-Bots + Grid-Instanzen).
+            try:
+                _cfg = load_config(); _seen = set(); _tot = 0.0
+                for _bid in ("signal", "grid", "dca"):
+                    _ak = _cfg["bots"].get(_bid, {}).get("api_key", "")
+                    if _ak and _ak not in _seen:
+                        _seen.add(_ak); _tot += float(state_copy["bots"][_bid].get("balance", 0) or 0)
+                for _inst in _cfg.get("grid_instances", []):
+                    _ak = _inst.get("api_key", "")
+                    if _ak and _ak not in _seen:
+                        _seen.add(_ak)
+                        _tot += float(state_copy["grid_instances"].get(_inst.get("id"), {}).get("balance", 0) or 0)
+                state_copy["total_balance"] = round(_tot, 2)
+            except Exception:
+                state_copy["total_balance"] = None
             self._json(state_copy)
         elif self.path == "/api/config":
             self._json(load_config())
@@ -6528,7 +6334,7 @@ class Handler(BaseHTTPRequestHandler):
                 cfg["live_mode"] = bool(data["live_mode"])
                 with plock:
                     pstate["live_mode"] = cfg["live_mode"]
-            for bid in ("signal","grid","funding","dca"):
+            for bid in ("signal","grid","dca"):
                 bd = data.get("bots",{}).get(bid,{})
                 for k, v in bd.items():
                     if k not in cfg["bots"][bid]:
@@ -6717,7 +6523,7 @@ def start_server():
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     log.info("="*55)
-    log.info("  Trading Platform v1 | Signal | Grid | Funding | DCA")
+    log.info("  Trading Platform | Signal | Grid | DCA")
     log.info("="*55)
 
     cfg = load_config()
@@ -6743,7 +6549,7 @@ if __name__ == "__main__":
     # Auto-Start: Bots mit gesetztem 'autostart' nach (Neu-)Start automatisch hochfahren
     # (z.B. nach Stromausfall). Positionen sind zwischenzeitlich durch SL/TP auf Bitget
     # geschuetzt. Nur Bots mit hinterlegten Keys starten wirklich.
-    for _bid in ("signal","grid","funding","dca"):
+    for _bid in ("signal","grid","dca"):
         if cfg["bots"].get(_bid, {}).get("autostart"):
             _ok, _msg = start_bot(_bid)
             log.info(f"Auto-Start {_bid}: {_msg}")
@@ -6754,7 +6560,7 @@ if __name__ == "__main__":
     try:
         while True:
             time.sleep(60)
-            for bid in ("signal","grid","funding","dca"):
+            for bid in ("signal","grid","dca"):
                 if bid in bot_threads and not bot_threads[bid].is_alive():
                     with plock:
                         if pstate["bots"][bid]["status"] not in ("STOPPED","STOPPING","EMERGENCY STOP"):
