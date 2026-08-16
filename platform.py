@@ -534,12 +534,56 @@ class BitgetClient:
         return None
 
     def set_leverage(self, symbol, leverage):
+        if self.is_uta():
+            for side in ("long", "short"):
+                self.post("/api/v3/account/set-leverage", {
+                    "category": self.UTA_CATEGORY, "symbol": symbol,
+                    "leverage": str(leverage), "marginMode": "isolated",
+                    "posSide": side,
+                })
+            return
         for side in ["long","short"]:
             self.post("/api/v2/mix/account/set-leverage", {
                 "symbol": symbol, "productType": PRODUCT_TYPE,
                 "marginCoin": MARGIN_COIN, "leverage": str(leverage),
                 "holdSide": side,
             })
+
+    def place_futures_order(self, symbol, side, size, close=False, tp=None, sl=None,
+                            margin_mode="isolated"):
+        """Futures Market-Order fuer Classic ODER UTA (Auto-Erkennung). close=True schliesst
+        die Position (UTA One-Way: reduceOnly). tp/sl werden nur beim Oeffnen an die Order
+        gehaengt. Gibt die rohe API-Antwort zurueck (mit 'code'/'msg')."""
+        if self.is_uta():
+            body = {
+                "category": self.UTA_CATEGORY, "symbol": symbol,
+                "side": side, "orderType": "market", "qty": str(size),
+                "timeInForce": "ioc", "marginMode": margin_mode,
+                "reduceOnly": "yes" if close else "no",
+            }
+            if not close and tp is not None: body["takeProfit"] = fmt_p(symbol, tp)
+            if not close and sl is not None: body["stopLoss"]   = fmt_p(symbol, sl)
+            return self.post("/api/v3/trade/place-order", body)
+        body = {
+            "symbol": symbol, "productType": PRODUCT_TYPE,
+            "marginMode": margin_mode, "marginCoin": MARGIN_COIN,
+            "size": str(size), "side": side,
+            "tradeSide": "close" if close else "open",
+            "orderType": "market", "force": "ioc",
+        }
+        if not close and tp is not None: body["presetStopSurplusPrice"] = fmt_p(symbol, tp)
+        if not close and sl is not None: body["presetStopLossPrice"]    = fmt_p(symbol, sl)
+        return self.post("/api/v2/mix/order/place-order", body)
+
+    def cancel_all(self, symbol):
+        """Offene Orders stornieren. Classic: pro Symbol. UTA: kategorieweit (der Bot nutzt
+        Market-IOC-Orders, es liegen selten offene Orders - dies ist ein Sicherheitsnetz)."""
+        if self.is_uta():
+            return self.post("/api/v3/trade/cancel-all-order",
+                             {"category": self.UTA_CATEGORY})
+        return self.post("/api/v2/mix/order/cancel-all",
+                         {"symbol": symbol, "productType": PRODUCT_TYPE,
+                          "marginCoin": MARGIN_COIN})
 
     def fetch_market_precision(self, tick_dec: dict, min_qty: dict):
         """Holt Tick-Size und Min-Qty dynamisch von Bitget und aktualisiert die uebergebenen Dicts."""
@@ -612,10 +656,22 @@ class BitgetClient:
 
     def spot_buy(self, symbol, usdt_amount):
         """
-        Spot Market-Kauf: kauft mit einem fixen USDT-Betrag.
-        Bei Spot-Market-Buy ist 'size' die Quote-Currency (USDT).
-        Gibt (ok: bool, qty_bought: float, error_msg: str) zurueck.
+        Spot Market-Kauf fuer einen fixen USDT-Betrag.
+        Classic: 'size' = Quote-Currency (USDT). UTA: 'qty' = Basiswaehrung (USDT/Preis),
+        Kategorie SPOT. Gibt (ok, qty_bought, error_msg) zurueck.
         """
+        if self.is_uta():
+            px = self.spot_price(symbol)
+            if px <= 0:
+                return False, 0.0, "kein Spot-Preis"
+            qty = fmt_q(symbol, usdt_amount / px)
+            resp = self.post("/api/v3/trade/place-order", {
+                "category": "SPOT", "symbol": symbol, "side": "buy",
+                "orderType": "market", "qty": str(qty), "timeInForce": "ioc",
+            })
+            if resp.get("code") == "00000":
+                return True, float(qty), ""
+            return False, 0.0, resp.get("msg", "Unbekannter Fehler")
         # Auf 2 Nachkommastellen runden reicht fuer USDT-Betrag
         size_str = f"{usdt_amount:.2f}"
         resp = self.post("/api/v2/spot/trade/place-order", {
@@ -1592,6 +1648,10 @@ def _ensure_sltp(client, sym, direction, sl, tp, size):
     fail-safe: bei Fehlern nur Log, nie Absturz, KEIN Auto-Close (vermeidet
     Fehl-Schliessungen bei API-Eigenheiten)."""
     cur = sym.replace("USDT", "")
+    if client.is_uta():
+        # UTA: SL/TP haengen bereits an der Open-Order (takeProfit/stopLoss) - ein
+        # separater TPSL-Nachtrag entfaellt hier.
+        return
     try:
         time.sleep(1)  # Bitget kurz Zeit geben, die Position zu registrieren
         pos = client.position(sym)
@@ -1938,14 +1998,9 @@ def run_signal(flag):
                             blog("signal",f"{cur}: Order abgebrochen – {why} (Menge '{qs}')","ERROR")
                             return
                         sl, tp = calc_sl_tp(px, direction)
-                        resp = client.post("/api/v2/mix/order/place-order", {
-                            "symbol":sym,"productType":PRODUCT_TYPE,
-                            "marginMode":"isolated","marginCoin":MARGIN_COIN,
-                            "size":qs,"side":"buy" if direction=="LONG" else "sell",
-                            "tradeSide":"open","orderType":"market","force":"ioc",
-                            "presetStopSurplusPrice":fmt_p(sym,tp),
-                            "presetStopLossPrice":fmt_p(sym,sl),
-                        })
+                        resp = client.place_futures_order(
+                            sym, "buy" if direction == "LONG" else "sell", qs,
+                            close=False, tp=tp, sl=sl)
                         if resp.get("code") == "00000":
                             open_pos_count += 1
                             # neue Position in die Zyklus-Liste aufnehmen, damit spaetere
@@ -1961,13 +2016,9 @@ def run_signal(flag):
                     if pos:
                         ps = "LONG" if pos["holdSide"]=="long" else "SHORT"
                         if (ps=="LONG" and sig=="SHORT") or (ps=="SHORT" and sig=="LONG"):
-                            client.post("/api/v2/mix/order/place-order", {
-                                "symbol":sym,"productType":PRODUCT_TYPE,
-                                "marginMode":"isolated","marginCoin":MARGIN_COIN,
-                                "size":str(pos["total"]),
-                                "side":"sell" if pos["holdSide"]=="long" else "buy",
-                                "tradeSide":"close","orderType":"market","force":"ioc",
-                            })
+                            client.place_futures_order(
+                                sym, "sell" if pos["holdSide"] == "long" else "buy",
+                                str(pos["total"]), close=True)
                             open_pos_count = max(0, open_pos_count - 1)
                             open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
                             blog("signal",f"{cur}: Position gedreht","TRADE")
@@ -2071,12 +2122,7 @@ def run_grid(flag):
                     blog("grid",f"Grid BUY @ {levels[current_idx]:.2f} abgebrochen – {why}","ERROR")
                     resp = {}
                 else:
-                    resp = client.post("/api/v2/mix/order/place-order", {
-                        "symbol": sym, "productType": PRODUCT_TYPE,
-                        "marginMode":"isolated","marginCoin":MARGIN_COIN,
-                        "size": qsg, "side": "buy",
-                        "tradeSide":"open","orderType":"market","force":"ioc",
-                    })
+                    resp = client.place_futures_order(sym, "buy", qsg, close=False)
                 ok = resp.get("code") == "00000"
                 if ok:
                     net_qty += qty_lvl; held.append(current_idx); trades += 1
@@ -2097,12 +2143,7 @@ def run_grid(flag):
                         blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} abgebrochen – {why}","ERROR")
                         resp = {}
                     else:
-                        resp = client.post("/api/v2/mix/order/place-order", {
-                            "symbol": sym, "productType": PRODUCT_TYPE,
-                            "marginMode":"isolated","marginCoin":MARGIN_COIN,
-                            "size": qss, "side": "sell",
-                            "tradeSide":"close","orderType":"market","force":"ioc",
-                        })
+                        resp = client.place_futures_order(sym, "sell", qss, close=True)
                     ok = resp.get("code") == "00000"
                     if ok:
                         # Schaetzung: Level-Abstand minus geschaetzte Round-Trip-Gebuehren.
@@ -2207,12 +2248,7 @@ def run_grid_instance(flag, inst_cfg, inst_id):
                     _ilog(inst_id, name, f"Grid BUY @ {levels[current_idx]:.2f} abgebrochen – {why}","ERROR")
                     resp = {}
                 else:
-                    resp = client.post("/api/v2/mix/order/place-order", {
-                        "symbol":sym,"productType":PRODUCT_TYPE,
-                        "marginMode":"isolated","marginCoin":MARGIN_COIN,
-                        "size":qsg,"side":"buy",
-                        "tradeSide":"open","orderType":"market","force":"ioc",
-                    })
+                    resp = client.place_futures_order(sym, "buy", qsg, close=False)
                 ok = resp.get("code") == "00000"
                 if ok:
                     net_qty += qty_l; held.append(current_idx); trades += 1
@@ -2233,12 +2269,7 @@ def run_grid_instance(flag, inst_cfg, inst_id):
                         _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} abgebrochen – {why}","ERROR")
                         resp = {}
                     else:
-                        resp = client.post("/api/v2/mix/order/place-order", {
-                        "symbol":sym,"productType":PRODUCT_TYPE,
-                        "marginMode":"isolated","marginCoin":MARGIN_COIN,
-                        "size":qss,"side":"sell",
-                        "tradeSide":"close","orderType":"market","force":"ioc",
-                    })
+                        resp = client.place_futures_order(sym, "sell", qss, close=True)
                     ok = resp.get("code") == "00000"
                     if ok:
                         # Schaetzung: Level-Abstand minus geschaetzte Round-Trip-Gebuehren.
@@ -2457,13 +2488,9 @@ def _panic_close_account(client, label, cancel_syms):
         sym = pos.get("symbol", "")
         ok, last_msg = False, ""
         for _ in range(3):
-            resp = client.post("/api/v2/mix/order/place-order", {
-                "symbol": sym, "productType": PRODUCT_TYPE,
-                "marginMode": "isolated", "marginCoin": MARGIN_COIN,
-                "size": str(pos["total"]),
-                "side": "sell" if pos["holdSide"] == "long" else "buy",
-                "tradeSide": "close", "orderType": "market", "force": "ioc",
-            })
+            resp = client.place_futures_order(
+                sym, "sell" if pos["holdSide"] == "long" else "buy",
+                str(pos["total"]), close=True)
             if resp.get("code") == "00000":
                 ok = True; break
             last_msg = resp.get("msg", ""); time.sleep(1)
@@ -2474,8 +2501,7 @@ def _panic_close_account(client, label, cancel_syms):
             log.error(f"[PANIC] {label}: {sym} Fehler nach 3 Versuchen: {last_msg}")
             notify(f"[NOTFALL-STOPP] FEHLER: {label} {sym} konnte nicht geschlossen werden: {last_msg}", True)
     for csym in {s for s in cancel_syms if s}:
-        client.post("/api/v2/mix/order/cancel-all",
-                    {"symbol": csym, "productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN})
+        client.cancel_all(csym)
         time.sleep(0.15)
     return c, e
 
