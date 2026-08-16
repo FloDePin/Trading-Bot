@@ -1,3 +1,6 @@
+# HINWEIS: Nur Referenz-Vorlage. setup.sh erzeugt die echte Unit automatisch
+# mit deinem tatsaechlichen Benutzernamen und Home-Pfad. Wenn du diese Datei
+# manuell nutzt, ersetze "pi" und "/home/pi" durch deinen User bzw. dein Home.
 [Unit]
 Description=Trading Platform v1 – Multi Bot (Signal, Grid, Funding, DCA)
 After=network-online.target

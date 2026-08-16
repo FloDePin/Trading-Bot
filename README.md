@@ -1,12 +1,14 @@
 <div align="center">
 
-# 📈 Trading Platform v1.1
+# 📈 Trading Platform v1.2
 
 **Self-hosted multi-bot trading platform for Bitget Futures & Spot, by FloDePin**
 
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org) [![Version](https://img.shields.io/badge/version-1.1-orange)](#changelog)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org) [![Version](https://img.shields.io/badge/version-1.2-orange)](#changelog)
 
 🇬🇧 **English** | 🇩🇪 [Deutsch](README.de.md)
+
+🍓 **Raspberry Pi install guide:** [PI_SETUP.md](PI_SETUP.md)
 
 *An open-source, self-hosted multi-bot trading platform for Bitget Futures & Spot with a real-time web dashboard. Built in pure Python – no cloud, no subscription, no middleman.*
 
@@ -15,6 +17,23 @@
 ---
 
 ## Changelog
+
+### v1.2 (2026-08)
+
+**Browser-based first-run setup**
+- On a headless start (systemd, no terminal) the dashboard **no longer auto-generates a random password**. Instead, the first visit shows a **setup wizard** where you choose your own username + password (min. 8 characters). After that, normal HTTP Basic Auth applies with your credentials and the setup endpoint is permanently closed.
+- Starting manually in a terminal keeps the interactive first-run prompt.
+- To reset the login: stop the service, set `"dashboard_password"` to `""` in `platform_config.json`, restart — the wizard reappears.
+
+**Universal Raspberry Pi setup**
+- `setup.sh` now **auto-detects the real user and home directory** (works under `sudo` too) — no longer hardcoded to the `pi` user, so it works on any Pi/Linux box regardless of username.
+- New step-by-step Pi install guides: [PI_SETUP.md](PI_SETUP.md) (EN) / [PI_SETUP.de.md](PI_SETUP.de.md) (DE), including a troubleshooting section (Windows line endings, missing `pip3`, permissions).
+
+### v1.1.1 (2026-08)
+
+- The `pnl_below` alert now includes **Multi-Grid instances** in the total (was silently excluded).
+- Grid instances now send **Telegram/Discord notifications** on trades/errors, matching the main bots.
+- All SQLite connections are closed via `try/finally` — no connection leak if a query raises.
 
 ### v1.1 (2026-08)
 

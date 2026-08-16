@@ -1,12 +1,14 @@
 <div align="center">
 
-# 📈 Trading Platform v1.1
+# 📈 Trading Platform v1.2
 
 **Selbst gehostete Multi-Bot-Trading-Plattform für Bitget Futures & Spot, von FloDePin**
 
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org) [![Version](https://img.shields.io/badge/version-1.1-orange)](#changelog)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org) [![Version](https://img.shields.io/badge/version-1.2-orange)](#changelog)
 
 🇬🇧 [English](README.md) | 🇩🇪 **Deutsch**
+
+🍓 **Raspberry-Pi-Installationsanleitung:** [PI_SETUP.de.md](PI_SETUP.de.md)
 
 *Eine quelloffene, selbst gehostete Multi-Bot-Trading-Plattform für Bitget Futures & Spot mit Echtzeit-Web-Dashboard. In reinem Python gebaut – keine Cloud, kein Abo, kein Mittelsmann.*
 
@@ -15,6 +17,23 @@
 ---
 
 ## Changelog
+
+### v1.2 (2026-08)
+
+**Browser-basierte Erst-Einrichtung**
+- Beim headless-Start (systemd, kein Terminal) generiert das Dashboard **kein Zufallspasswort mehr**. Stattdessen erscheint beim ersten Aufruf ein **Setup-Assistent**, in dem du Benutzername + Passwort (min. 8 Zeichen) selbst festlegst. Danach gilt normale HTTP Basic Auth mit deinen Zugangsdaten, und der Setup-Endpunkt ist dauerhaft gesperrt.
+- Der manuelle Start im Terminal behält die interaktive Erst-Abfrage.
+- Login zurücksetzen: Dienst stoppen, in `platform_config.json` `"dashboard_password"` auf `""` setzen, neu starten — der Assistent erscheint erneut.
+
+**Universelles Raspberry-Pi-Setup**
+- `setup.sh` erkennt jetzt **Benutzer und Home-Verzeichnis automatisch** (auch unter `sudo`) — nicht mehr fest auf den Nutzer `pi` verdrahtet, funktioniert also auf jedem Pi/Linux unabhängig vom Benutzernamen.
+- Neue Schritt-für-Schritt-Anleitungen: [PI_SETUP.de.md](PI_SETUP.de.md) (DE) / [PI_SETUP.md](PI_SETUP.md) (EN), inkl. Problembehebung (Windows-Zeilenumbrüche, fehlendes `pip3`, Rechte).
+
+### v1.1.1 (2026-08)
+
+- Der `pnl_below`-Alarm bezieht jetzt **Multi-Grid-Instanzen** in die Summe ein (wurden vorher stillschweigend ausgelassen).
+- Grid-Instanzen senden jetzt **Telegram-/Discord-Benachrichtigungen** bei Trades/Fehlern, wie die Haupt-Bots.
+- Alle SQLite-Verbindungen werden per `try/finally` geschlossen — kein Verbindungsleck, wenn eine Abfrage fehlschlägt.
 
 ### v1.1 (2026-08)
 

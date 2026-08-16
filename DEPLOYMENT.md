@@ -1,5 +1,9 @@
 # Trading Platform v1 – Deployment Guide
 
+> 🍓 **Einsteiger-freundliche Schritt-für-Schritt-Anleitung für den Raspberry Pi:**
+> [PI_SETUP.de.md](PI_SETUP.de.md) · 🇬🇧 [PI_SETUP.md](PI_SETUP.md)
+> Dieses Dokument hier ist die technische Referenz.
+
 ## Zielsetup
 
 ```
@@ -15,16 +19,18 @@ Heimnetzwerk
 ## Schritt 1: Dateien auf den Pi kopieren
 
 ```bash
-# Vom PC aus (Pi-IP anpassen)
-scp platform.py pi@192.168.1.xxx:/home/pi/trading/
-scp deploy/setup.sh pi@192.168.1.xxx:/home/pi/trading/
+# Vom PC aus (Benutzer + Pi-IP anpassen)
+scp platform.py setup.sh YOUR_USER@PI_IP:~
 ```
 
 Oder per USB-Stick, dann auf dem Pi:
 ```bash
 mkdir ~/trading
-cp /media/pi/USB/platform.py ~/trading/
+cp /media/*/USB/platform.py ~/trading/
 ```
+
+> Hinweis: Das `setup.sh` erkennt deinen Benutzernamen automatisch – es ist
+> **nicht** mehr auf den Nutzer `pi` festgelegt.
 
 ---
 
@@ -75,6 +81,12 @@ Nach dem Start erreichbar unter:
 ```
 http://[PI-IP-ADRESSE]:5000
 ```
+
+**Erster Aufruf (ab v1.2):** Es wird kein Passwort mehr ins Log generiert.
+Beim ersten Öffnen erscheint ein **Setup-Assistent**, in dem du Benutzername
+und Passwort (min. 8 Zeichen) selbst festlegst. Danach gilt HTTP Basic Auth
+mit deinen Zugangsdaten. Zum Zurücksetzen: Dienst stoppen, in
+`platform_config.json` `"dashboard_password"` auf `""` setzen, Dienst starten.
 
 Pi-IP finden:
 ```bash
