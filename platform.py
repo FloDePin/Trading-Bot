@@ -34,6 +34,7 @@ log = logging.getLogger("Platform")
 # ─────────────────────────────────────────────
 CONFIG_FILE    = "platform_config.json"
 DCA_STATE_FILE = "dca_state.json"
+GRID_STATE_FILE = "grid_state.json"
 DB_FILE        = "platform.db"
 DASHBOARD_PORT = 5000
 BASE_URL       = "https://api.bitget.com"
@@ -44,6 +45,7 @@ MARGIN_COIN    = "USDT"
 #  SQLITE – PERSISTENTE DATEN
 # ─────────────────────────────────────────────
 _db_lock = threading.Lock()
+_state_lock = threading.Lock()   # schuetzt dca_state.json / grid_state.json vor gleichzeitigen Thread-Zugriffen
 
 def init_db():
     with _db_lock:
@@ -153,7 +155,7 @@ DEFAULT_CONFIG = {
     "grid_instances":  [],
     "bots": {
         "signal": {
-            "name": "Signal Bot", "enabled": False,
+            "name": "Signal Bot", "enabled": False, "autostart": False,
             "api_key": "", "api_secret": "", "passphrase": "",
             "tokens": ["SOLUSDT","ETHUSDT","XRPUSDT","DOGEUSDT"],
             "leverage": 3, "usdt_per_trade": 30, "budget_usdt": 0,
@@ -173,20 +175,20 @@ DEFAULT_CONFIG = {
             "signal_threshold": 3, "check_interval": 30,
         },
         "grid": {
-            "name": "Grid Bot", "enabled": False,
+            "name": "Grid Bot", "enabled": False, "autostart": False,
             "api_key": "", "api_secret": "", "passphrase": "",
             "symbol": "BTCUSDT", "upper_price": 0.0, "lower_price": 0.0,
             "grid_count": 10, "investment": 100.0, "check_interval": 10,
         },
         "funding": {
-            "name": "Funding Bot", "enabled": False,
+            "name": "Funding Bot", "enabled": False, "autostart": False,
             "api_key": "", "api_secret": "", "passphrase": "",
             "watch": ["SOLUSDT","ETHUSDT","XRPUSDT","DOGEUSDT","BTCUSDT"],
             "min_funding_rate": 0.0003, "max_position_usdt": 200.0,
             "check_interval": 60,
         },
         "dca": {
-            "name": "DCA Bot", "enabled": False,
+            "name": "DCA Bot", "enabled": False, "autostart": False,
             "api_key": "", "api_secret": "", "passphrase": "",
             "symbol": "BTCUSDT", "interval_hours": 24,
             "amount_per_buy": 20.0, "check_interval": 300,
@@ -312,27 +314,58 @@ def dca_load_state(symbol):
     So verliert der DCA-Bot nach Neustart/Absturz seine Statistik nicht - und kauft
     NICHT sofort erneut (last_buy bleibt erhalten)."""
     try:
-        if os.path.exists(DCA_STATE_FILE):
-            with open(DCA_STATE_FILE) as f:
-                s = json.load(f).get(symbol, {})
-            return (float(s.get("total_inv", 0)), float(s.get("total_qty", 0)),
-                    int(s.get("buy_count", 0)), float(s.get("last_buy", 0)))
+        with _state_lock:
+            if os.path.exists(DCA_STATE_FILE):
+                with open(DCA_STATE_FILE) as f:
+                    s = json.load(f).get(symbol, {})
+                return (float(s.get("total_inv", 0)), float(s.get("total_qty", 0)),
+                        int(s.get("buy_count", 0)), float(s.get("last_buy", 0)))
     except Exception as e:
         log.debug(f"dca_load_state: {e}")
     return 0.0, 0.0, 0, 0.0
 
 def dca_save_state(symbol, total_inv, total_qty, buy_count, last_buy):
     try:
-        data = {}
-        if os.path.exists(DCA_STATE_FILE):
-            with open(DCA_STATE_FILE) as f:
-                data = json.load(f)
-        data[symbol] = {"total_inv": round(total_inv, 6), "total_qty": round(total_qty, 8),
-                        "buy_count": buy_count, "last_buy": last_buy}
-        with open(DCA_STATE_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+        with _state_lock:
+            data = {}
+            if os.path.exists(DCA_STATE_FILE):
+                with open(DCA_STATE_FILE) as f:
+                    data = json.load(f)
+            data[symbol] = {"total_inv": round(total_inv, 6), "total_qty": round(total_qty, 8),
+                            "buy_count": buy_count, "last_buy": last_buy}
+            with open(DCA_STATE_FILE, "w") as f:
+                json.dump(data, f, indent=2)
     except Exception as e:
         log.debug(f"dca_save_state: {e}")
+
+def grid_load_state(key):
+    """Laedt den persistierten Grid-Stand (held/net_qty/current_idx/...) fuer 'key'
+    ('grid' oder eine Instanz-ID). So laeuft ein Grid nach Neustart/Stromausfall korrekt
+    weiter statt seinen Merker zu verlieren. Gibt dict oder None zurueck."""
+    try:
+        with _state_lock:
+            if os.path.exists(GRID_STATE_FILE):
+                with open(GRID_STATE_FILE) as f:
+                    return json.load(f).get(key)
+    except Exception as e:
+        log.debug(f"grid_load_state: {e}")
+    return None
+
+def grid_save_state(key, data):
+    try:
+        with _state_lock:
+            d = {}
+            if os.path.exists(GRID_STATE_FILE):
+                with open(GRID_STATE_FILE) as f:
+                    d = json.load(f)
+            if data is None:
+                d.pop(key, None)
+            else:
+                d[key] = data
+            with open(GRID_STATE_FILE, "w") as f:
+                json.dump(d, f, indent=2)
+    except Exception as e:
+        log.debug(f"grid_save_state: {e}")
 
 # ─────────────────────────────────────────────
 #  BITGET API CLIENT
@@ -1828,6 +1861,36 @@ def run_signal(flag):
 
     while not flag["stop"]:
         try:
+            # Live-Reconfig: weiche Parameter jeden Zyklus neu einlesen, damit Aenderungen
+            # in den Settings OHNE Bot-Neustart greifen. (Tokens, Hebel und API-Keys bleiben
+            # bewusst wie beim Start - die brauchen einen Neustart.)
+            _cfg = load_config(); bc = _cfg["bots"]["signal"]
+            thresh          = bc.get("signal_threshold", 3)
+            check           = bc.get("check_interval", 30)
+            risk_pct        = bc.get("risk_pct", 3.0)
+            use_risk_pct    = bc.get("use_risk_pct", True)
+            usdt_pt         = bc.get("usdt_per_trade", 30)
+            budget_usdt     = float(bc.get("budget_usdt", 0))
+            sl_pct          = bc.get("stop_loss_pct", 0.010)
+            tp_pct          = bc.get("take_profit_pct", 0.020)
+            use_atr_sl      = bc.get("use_atr_sl", True)
+            atr_sl_mult     = bc.get("atr_sl_mult", 1.5)
+            atr_tp_mult     = bc.get("atr_tp_mult", 2.5)
+            max_conc        = bc.get("max_concurrent", 2)
+            use_corr_filter = bc.get("use_correlation_filter", True)
+            max_corr        = float(bc.get("max_correlation", 0.85))
+            use_adx         = bc.get("use_adx_filter", True)
+            min_adx         = float(bc.get("min_adx", 20))
+            use_ob          = bc.get("use_orderbook_signal", True)
+            use_sltp_guard  = bc.get("use_sltp_guard", True)
+            use_ema=bc.get("use_ema",True);       use_rsi=bc.get("use_rsi",True)
+            use_macd=bc.get("use_macd",True);     use_bb=bc.get("use_bb",True)
+            use_volume=bc.get("use_volume",True); use_funding=bc.get("use_funding",True)
+            use_fg=bc.get("use_fg",True);         use_news=bc.get("use_news",True)
+            use_macro=bc.get("use_macro",True);   use_trend=bc.get("use_trend",False)
+            trend_len=max(20,int(bc.get("trend_len",50)))
+            fkey            = _cfg.get("finnhub_key","")
+
             bal = client.balance(retries=3) or start_bal
             pnl = bal - start_bal
             pct = pnl / start_bal if start_bal > 0 else 0
@@ -2019,6 +2082,20 @@ def run_signal(flag):
                             client.place_futures_order(
                                 sym, "sell" if pos["holdSide"] == "long" else "buy",
                                 str(pos["total"]), close=True)
+                            # Buchhaltung fuer die gedrehte (geschlossene) Position - sonst
+                            # taucht der Trade nie in DB/Historie auf und die Streak stimmt nicht.
+                            entry = float(pos.get("openPriceAvg", 0))
+                            upnl  = float(pos.get("unrealizedPL", 0))
+                            psize = float(pos.get("total", 0))
+                            fee   = (entry + price_now) * psize * fee_rate
+                            net   = upnl - fee
+                            db_save_trade("signal", cur, ps, entry, round(price_now,4),
+                                          round(net,4), fee=round(fee,6), size=psize)
+                            if net > 0: win_streak += 1; loss_streak = 0
+                            else:       loss_streak += 1; win_streak = 0
+                            with plock:
+                                pstate["bots"]["signal"].update({
+                                    "win_streak":win_streak, "loss_streak":loss_streak})
                             open_pos_count = max(0, open_pos_count - 1)
                             open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
                             blog("signal",f"{cur}: Position gedreht","TRADE")
@@ -2099,6 +2176,22 @@ def run_grid(flag):
     # gehandelt - kein endloses Nachkaufen bei Oszillation um dasselbe Level.
     current_idx = min(range(len(levels)), key=lambda i: abs(levels[i]-cur_price)) if cur_price > 0 else n // 2
 
+    # Persistierten Grid-Stand laden - nur wenn die Konfiguration identisch ist (sonst passen
+    # die gespeicherten Level-Indizes nicht mehr). So laeuft der Grid nach Neustart weiter.
+    sig_key = f"{sym}|{round(upper,4)}|{round(lower,4)}|{n}"
+    _st = grid_load_state("grid")
+    if _st and _st.get("key") == sig_key:
+        net_qty     = float(_st.get("net_qty", 0))
+        held        = list(_st.get("held", []))
+        current_idx = int(_st.get("current_idx", current_idx))
+        pnl         = float(_st.get("pnl", 0))
+        trades      = int(_st.get("trades", 0))
+        blog("grid", f"Fortgesetzt aus grid_state.json: {len(held)} offene Level, net_qty={net_qty:.6f}")
+
+    def _persist_grid():
+        grid_save_state("grid", {"key": sig_key, "net_qty": net_qty, "held": held,
+                                 "current_idx": current_idx, "pnl": round(pnl, 6), "trades": trades})
+
     with plock:
         pstate["bots"]["grid"].update({
             "status":"RUNNING","balance":start_bal,"start_bal":start_bal,
@@ -2126,6 +2219,7 @@ def run_grid(flag):
                 ok = resp.get("code") == "00000"
                 if ok:
                     net_qty += qty_lvl; held.append(current_idx); trades += 1
+                    _persist_grid()
                 status = "✓" if ok else f"Fehler {resp.get('msg','')}"
                 blog("grid",f"Grid BUY @ {levels[current_idx]:.2f} [Level {current_idx+1}/{n}] {status}",
                      "TRADE" if ok else "ERROR")
@@ -2152,6 +2246,7 @@ def run_grid(flag):
                         net_qty = max(0.0, net_qty - qty_trade)
                         if held: held.pop()
                         trades += 1
+                        _persist_grid()
                     if resp:
                         status = "✓" if ok else f"Fehler {resp.get('msg','')}"
                         blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx+1}/{n}] {status}",
@@ -2225,6 +2320,21 @@ def run_grid_instance(flag, inst_cfg, inst_id):
     # Crossing-Logik (wie run_grid): kaufen beim Kreuzen nach unten, verkaufen nach oben.
     current_idx = min(range(len(levels)), key=lambda i: abs(levels[i]-cur_price)) if cur_price > 0 else n // 2
 
+    # Persistierten Stand dieser Instanz laden (nur bei identischer Konfiguration).
+    sig_key = f"{sym}|{round(upper,4)}|{round(lower,4)}|{n}"
+    _st = grid_load_state(inst_id)
+    if _st and _st.get("key") == sig_key:
+        net_qty     = float(_st.get("net_qty", 0))
+        held        = list(_st.get("held", []))
+        current_idx = int(_st.get("current_idx", current_idx))
+        pnl         = float(_st.get("pnl", 0))
+        trades      = int(_st.get("trades", 0))
+        _ilog(inst_id, name, f"Fortgesetzt aus grid_state.json: {len(held)} offene Level")
+
+    def _persist_grid():
+        grid_save_state(inst_id, {"key": sig_key, "net_qty": net_qty, "held": held,
+                                  "current_idx": current_idx, "pnl": round(pnl, 6), "trades": trades})
+
     with plock:
         pstate["grid_instances"][inst_id].update({
             "status":"RUNNING","balance":start_bal,"start_bal":start_bal,
@@ -2252,6 +2362,7 @@ def run_grid_instance(flag, inst_cfg, inst_id):
                 ok = resp.get("code") == "00000"
                 if ok:
                     net_qty += qty_l; held.append(current_idx); trades += 1
+                    _persist_grid()
                 if resp:
                     istatus = "OK" if ok else f"Fehler {resp.get('msg','')}"
                     _ilog(inst_id, name, f"Grid BUY @ {levels[current_idx]:.2f} L{current_idx+1}/{n} {istatus}",
@@ -2278,6 +2389,7 @@ def run_grid_instance(flag, inst_cfg, inst_id):
                         net_qty = max(0.0, net_qty - qty_trade)
                         if held: held.pop()
                         trades += 1
+                        _persist_grid()
                     istatus = "OK" if ok else f"Fehler {resp.get('msg','')}"
                     _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx+1}/{n} {istatus}",
                           "TRADE" if ok else "ERROR")
@@ -2438,6 +2550,9 @@ def run_dca(flag):
                         buy_count += 1
                         last_buy   = now
                         dca_save_state(sym, total_inv, total_qty, buy_count, last_buy)
+                        # Kauf in die DB schreiben, damit DCA in Historie/Timing auftaucht
+                        # (Spot-Kauf hat keinen realisierten PnL -> 0).
+                        db_save_trade("dca", sym.replace("USDT",""), "buy", px, px, 0.0, fee=0.0, size=qty)
                         avg = total_inv / total_qty if total_qty > 0 else 0
                         blog("dca",
                             f"Spot-Kauf: ~{qty:.6f} {sym.replace('USDT','')} "
@@ -2480,11 +2595,9 @@ def _panic_close_account(client, label, cancel_syms):
     """Schliesst alle offenen Positionen und storniert Orders fuer EIN Konto (client).
     Gibt (geschlossen, fehler) zurueck. Wird pro Haupt-Bot UND pro Grid-Instanz genutzt."""
     c, e = 0, 0
-    r = client.get("/api/v2/mix/position/all-position",
-                   {"productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN})
-    for pos in r.get("data", []):
-        if float(pos.get("total", 0)) <= 0:
-            continue
+    # all_positions() erkennt Classic/UTA automatisch und liefert normalisierte Felder -
+    # der frühere klassische Direktaufruf fand auf UTA-Konten nichts (bzw. warf).
+    for pos in client.all_positions():
         sym = pos.get("symbol", "")
         ok, last_msg = False, ""
         for _ in range(3):
@@ -3653,6 +3766,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label>API Key</label><input type="text" id="sig-key" placeholder="Bitget API Key"></div>
         <div class="field-row"><label>API Secret</label><input type="password" id="sig-sec" placeholder="Bitget API Secret"></div>
         <div class="field-row"><label>Passphrase</label><input type="password" id="sig-pass" placeholder="Bitget Passphrase"></div>
+        <div class="field-row"><label data-i18n="lbl_autostart">Auto-Start nach Neustart</label><input type="checkbox" id="sig-autostart" style="width:auto"></div>
         <div class="field-row"><label>Leverage (1-10)</label><input type="number" id="sig-lever" placeholder="3" min="1" max="10"></div>
         <div class="field-row"><label data-i18n="lbl_risk_trade">Risiko pro Trade (%)</label><input type="number" id="sig-risk-pct" placeholder="3.0" step="0.5" min="0.5" max="10"></div>
         <div class="field-row"><label data-i18n="lbl_usdt_trade">USDT pro Trade (fallback)</label><input type="number" id="sig-usdt" placeholder="30" min="5"></div>
@@ -3710,6 +3824,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label>API Key</label><input type="text" id="grd-key" placeholder="Bitget API Key"></div>
         <div class="field-row"><label>API Secret</label><input type="password" id="grd-sec" placeholder="Bitget API Secret"></div>
         <div class="field-row"><label>Passphrase</label><input type="password" id="grd-pass" placeholder="Bitget Passphrase"></div>
+        <div class="field-row"><label data-i18n="lbl_autostart">Auto-Start nach Neustart</label><input type="checkbox" id="grd-autostart" style="width:auto"></div>
         <div class="field-row">
           <label>Symbol</label>
           <select id="grd-sym" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:8px 10px;border-radius:5px;width:100%">
@@ -3749,6 +3864,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label>API Key</label><input type="text" id="fnd-key" placeholder="Bitget API Key"></div>
         <div class="field-row"><label>API Secret</label><input type="password" id="fnd-sec" placeholder="Bitget API Secret"></div>
         <div class="field-row"><label>Passphrase</label><input type="password" id="fnd-pass" placeholder="Bitget Passphrase"></div>
+        <div class="field-row"><label data-i18n="lbl_autostart">Auto-Start nach Neustart</label><input type="checkbox" id="fnd-autostart" style="width:auto"></div>
         <div class="field-row"><label data-i18n="lbl_min_funding">Min. Funding Rate (%)</label><input type="number" id="fnd-minrate" placeholder="0.03" step="0.001"></div>
         <div class="field-row"><label data-i18n="lbl_max_pos">Max. Position (USDT)</label><input type="number" id="fnd-maxpos" placeholder="200" min="10"></div>
         <div class="validate-row">
@@ -3774,6 +3890,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label>API Key</label><input type="text" id="dca-key" placeholder="Bitget API Key"></div>
         <div class="field-row"><label>API Secret</label><input type="password" id="dca-sec" placeholder="Bitget API Secret"></div>
         <div class="field-row"><label>Passphrase</label><input type="password" id="dca-pass" placeholder="Bitget Passphrase"></div>
+        <div class="field-row"><label data-i18n="lbl_autostart">Auto-Start nach Neustart</label><input type="checkbox" id="dca-autostart" style="width:auto"></div>
         <div class="field-row">
           <label>Symbol (Spot)</label>
           <select id="dca-sym" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:8px 10px;border-radius:5px;width:100%">
@@ -3940,6 +4057,7 @@ const STRINGS = {
     set_notify_note:'Telegram: @BotFather → /newbot → Token. Chat-ID von @userinfobot.<br>Discord: Server-Einstellungen → Integrationen → Webhooks → URL kopieren.<br>Beide koennen gleichzeitig aktiv sein. News-Sentiment: CoinGecko (kostenlos, kein Key).',
     set_preset:'Preset:', bp_cons:'KONSERVATIV', bp_std:'STANDARD', bp_agg:'AGGRESSIV',
     lbl_risk_trade:'Risiko pro Trade (%)', lbl_usdt_trade:'USDT pro Trade (fallback)', lbl_budget:'Budget (USDT)',
+    lbl_autostart:'Auto-Start nach Neustart',
     lbl_max_conc:'Max. gleichzeitige Pos.', lbl_corr_filter:'Korrelations-Filter', lbl_max_corr:'Max. Korrelation (0.5-1.0)',
     note_corr:'Korrelations-Filter: verhindert, dass der Bot eine neue Position eroeffnet, die zu stark mit einer bereits offenen, gleichgerichteten Position korreliert (Diversifikation). Bei fehlenden Daten wird normal weitergehandelt.',
     lbl_adx_filter:'ADX-Trendfilter', lbl_min_adx:'Min. ADX (10-40)',
@@ -4070,6 +4188,7 @@ const STRINGS = {
     set_notify_note:'Telegram: @BotFather → /newbot → token. Chat ID from @userinfobot.<br>Discord: Server settings → Integrations → Webhooks → copy URL.<br>Both can be active at once. News sentiment: CoinGecko (free, no key).',
     set_preset:'Preset:', bp_cons:'CONSERVATIVE', bp_std:'STANDARD', bp_agg:'AGGRESSIVE',
     lbl_risk_trade:'Risk per trade (%)', lbl_usdt_trade:'USDT per trade (fallback)', lbl_budget:'Budget (USDT)',
+    lbl_autostart:'Auto-start after reboot',
     lbl_max_conc:'Max simultaneous pos.', lbl_corr_filter:'Correlation filter', lbl_max_corr:'Max correlation (0.5-1.0)',
     note_corr:'Correlation filter: prevents the bot from opening a new position that is too strongly correlated with an already-open one in the same direction (diversification). When data is missing it keeps trading as normal.',
     lbl_adx_filter:'ADX trend filter', lbl_min_adx:'Min ADX (10-40)',
@@ -5844,7 +5963,8 @@ function update(state) {
   const sg = state.bots.signal || {};
   updateBotHeader('signal', sg);
   const spnl = parseFloat(sg.pnl||0);
-  document.getElementById('s-balance').textContent = parseFloat(sg.balance||0).toFixed(2);
+  // (kein 's-balance'-Element im Signal-Tab - Balance steht im Overview. Der alte Zugriff
+  //  hier warf null.textContent -> update() crashte -> 'Verbindung unterbrochen'.)
   const spnlEl = document.getElementById('s-pnl');
   spnlEl.textContent = (spnl>=0?'+':'')+spnl.toFixed(2);
   spnlEl.className = 'card-value ' + pnlColor(spnl);
@@ -6042,6 +6162,10 @@ function fillSettingsForm(state) {
     document.getElementById('dca-amt').value = s(b.dca?.amount_per_buy||20);
     // Secret/Passphrase werden aus Sicherheitsgruenden nicht zurueckgefuellt. Platzhalter
     // signalisiert, dass sie gespeichert sind - leer lassen = unveraendert (kein Neu-Eintippen).
+    document.getElementById('sig-autostart').checked = (b.signal?.autostart===true);
+    document.getElementById('grd-autostart').checked = (b.grid?.autostart===true);
+    document.getElementById('fnd-autostart').checked = (b.funding?.autostart===true);
+    document.getElementById('dca-autostart').checked = (b.dca?.autostart===true);
     const setPh = (id,has)=>{const el=document.getElementById(id); if(el&&has) el.placeholder='•••••• gespeichert (leer lassen = unveraendert)';};
     setPh('sig-sec',!!b.signal?.api_secret);  setPh('sig-pass',!!b.signal?.passphrase);
     setPh('grd-sec',!!b.grid?.api_secret);    setPh('grd-pass',!!b.grid?.passphrase);
@@ -6069,6 +6193,7 @@ async function saveSettings() {
         api_key:          val('sig-key'),
         api_secret:       val('sig-sec'),
         passphrase:       val('sig-pass'),
+        autostart:        document.getElementById('sig-autostart')?.checked || false,
         leverage:         int('sig-lever')    || 3,
         risk_pct:         num('sig-risk-pct') || 3.0,
         use_risk_pct:     true,
@@ -6097,6 +6222,7 @@ async function saveSettings() {
         api_key:     val('grd-key'),
         api_secret:  val('grd-sec'),
         passphrase:  val('grd-pass'),
+        autostart:   document.getElementById('grd-autostart')?.checked || false,
         symbol:      val('grd-sym')   || 'BTCUSDT',
         upper_price: num('grd-upper'),
         lower_price: num('grd-lower'),
@@ -6107,6 +6233,7 @@ async function saveSettings() {
         api_key:          val('fnd-key'),
         api_secret:       val('fnd-sec'),
         passphrase:       val('fnd-pass'),
+        autostart:        document.getElementById('fnd-autostart')?.checked || false,
         min_funding_rate: num('fnd-minrate') || 0.0003,
         max_position_usdt:num('fnd-maxpos')  || 200,
       },
@@ -6114,6 +6241,7 @@ async function saveSettings() {
         api_key:       val('dca-key'),
         api_secret:    val('dca-sec'),
         passphrase:    val('dca-pass'),
+        autostart:     document.getElementById('dca-autostart')?.checked || false,
         symbol:        val('dca-sym') || 'BTCUSDT',
         interval_hours:num('dca-hrs') || 24,
         amount_per_buy:num('dca-amt') || 20,
@@ -6537,6 +6665,7 @@ class Handler(BaseHTTPRequestHandler):
             save_config(cfg)
             with plock:
                 pstate["grid_instances"].pop(inst_id, None)
+            grid_save_state(inst_id, None)   # persistierten Stand mitloeschen
             self._json({"status":"ok"})
 
         elif self.path == "/api/grid/start_instance":
@@ -6610,6 +6739,14 @@ if __name__ == "__main__":
     threading.Thread(target=daily_summary_thread, daemon=True, name="daily-summary").start()
     threading.Thread(target=alert_check_thread,   daemon=True, name="alerts").start()
     threading.Thread(target=volatility_circuit_breaker, daemon=True, name="circuit-breaker").start()
+
+    # Auto-Start: Bots mit gesetztem 'autostart' nach (Neu-)Start automatisch hochfahren
+    # (z.B. nach Stromausfall). Positionen sind zwischenzeitlich durch SL/TP auf Bitget
+    # geschuetzt. Nur Bots mit hinterlegten Keys starten wirklich.
+    for _bid in ("signal","grid","funding","dca"):
+        if cfg["bots"].get(_bid, {}).get("autostart"):
+            _ok, _msg = start_bot(_bid)
+            log.info(f"Auto-Start {_bid}: {_msg}")
 
     log.info("Platform bereit. Bots koennen im Dashboard gestartet werden.")
     log.info("Strg+C zum Beenden.")

@@ -1,10 +1,10 @@
 <div align="center">
 
-# 📈 Trading Platform v1.2
+# 📈 Trading Platform v1.0
 
 **Self-hosted multi-bot trading platform for Bitget Futures & Spot, by FloDePin**
 
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org) [![Version](https://img.shields.io/badge/version-1.2-orange)](#changelog)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org) [![Version](https://img.shields.io/badge/version-1.0-brightgreen)](#changelog)
 
 🇬🇧 **English** | 🇩🇪 [Deutsch](README.de.md)
 
@@ -17,6 +17,33 @@
 ---
 
 ## Changelog
+
+### v1.0 (2026-08) — First stable release 🎉
+
+The first tagged, stable release — everything below is included.
+
+**Bitget Unified Account (UTA) support**
+- Auto-detects Classic vs. Unified accounts per API key and routes every call accordingly (balance, positions, orders, leverage, TP/SL, spot). New Bitget accounts (and demo accounts) are UTA by default — the platform now works on both **without any config change**, and keeps working for Classic accounts.
+
+**Reliability & recovery**
+- **Auto-Start** (opt-in per bot): after a reboot/power loss the marked bots start again automatically. Open positions stay protected by their SL/TP on Bitget in the meantime.
+- **Grid state persistence**: the Grid Bot (and each instance) resumes its filled levels after a restart.
+- **Live reconfiguration**: change the Signal Bot's threshold / risk / budget / factors / SL-TP in Settings and it applies within one cycle — no stop/restart needed.
+- Thread-safe state files (grid/DCA) and no more API-key loss on page reload/update.
+
+**Per-bot budget** for the Signal Bot — a hard margin cap so one shared account can be split across bots.
+
+**Fixes in this release**
+- Emergency Stop now works on Unified accounts (it listed positions via the classic endpoint before).
+- The Signal Bot now books the trade to the DB and updates the win/loss streak when it flips a position.
+- Removed a dashboard crash that showed "connection interrupted" (a reference to a non-existent element).
+- DCA buys are now recorded in the database (history/timing).
+
+**Setup:** browser-based first-run wizard for headless installs, universal Raspberry Pi `setup.sh` (auto-detects the user), and EN/DE Pi guides — see [PI_SETUP.md](PI_SETUP.md).
+
+---
+
+**Earlier development milestones (pre-1.0):**
 
 ### v1.2 (2026-08)
 

@@ -1,10 +1,10 @@
 <div align="center">
 
-# 📈 Trading Platform v1.2
+# 📈 Trading Platform v1.0
 
 **Selbst gehostete Multi-Bot-Trading-Plattform für Bitget Futures & Spot, von FloDePin**
 
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org) [![Version](https://img.shields.io/badge/version-1.2-orange)](#changelog)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org) [![Version](https://img.shields.io/badge/version-1.0-brightgreen)](#changelog)
 
 🇬🇧 [English](README.md) | 🇩🇪 **Deutsch**
 
@@ -17,6 +17,33 @@
 ---
 
 ## Changelog
+
+### v1.0 (2026-08) — Erstes stabiles Release 🎉
+
+Das erste getaggte, stabile Release — alles darunter ist enthalten.
+
+**Bitget Unified Account (UTA) Unterstützung**
+- Erkennt pro API-Key automatisch Classic vs. Unified und routet jeden Aufruf entsprechend (Balance, Positionen, Orders, Hebel, TP/SL, Spot). Neue Bitget-Konten (und Demo-Konten) sind standardmäßig UTA — die Plattform läuft jetzt auf **beiden ohne Config-Änderung** und weiterhin auf Classic-Konten.
+
+**Zuverlässigkeit & Wiederanlauf**
+- **Auto-Start** (opt-in pro Bot): nach Neustart/Stromausfall starten die markierten Bots automatisch wieder. Offene Positionen sind zwischenzeitlich durch ihr SL/TP auf Bitget geschützt.
+- **Grid-State-Persistenz**: der Grid-Bot (und jede Instanz) läuft nach einem Neustart korrekt weiter (gefüllte Level bleiben erhalten).
+- **Live-Reconfig**: Schwelle / Risk / Budget / Faktoren / SL-TP des Signal-Bots in den Settings ändern — greift im nächsten Zyklus, **ohne Stop/Neustart**.
+- Thread-sichere State-Dateien (Grid/DCA) und **keine Key-Verluste** mehr beim Seiten-Reload/Update.
+
+**Budget pro Bot** für den Signal-Bot — harte Margin-Obergrenze, damit ein gemeinsames Konto auf die Bots aufgeteilt werden kann.
+
+**Fixes in diesem Release**
+- Notfall-Stopp funktioniert jetzt auf Unified-Konten (listete Positionen vorher über den klassischen Endpunkt).
+- Der Signal-Bot bucht den Trade jetzt in die DB und aktualisiert die Win/Loss-Streak, wenn er eine Position dreht.
+- Ein Dashboard-Crash („Verbindung unterbrochen") entfernt (Zugriff auf ein nicht existierendes Element).
+- DCA-Käufe werden jetzt in der Datenbank erfasst (Historie/Timing).
+
+**Setup:** Browser-Setup-Assistent für headless-Installationen, universelles Raspberry-Pi-`setup.sh` (erkennt den Benutzer automatisch) und EN/DE-Pi-Anleitungen — siehe [PI_SETUP.de.md](PI_SETUP.de.md).
+
+---
+
+**Frühere Entwicklungs-Meilensteine (vor 1.0):**
 
 ### v1.2 (2026-08)
 
