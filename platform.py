@@ -156,7 +156,7 @@ DEFAULT_CONFIG = {
             "name": "Signal Bot", "enabled": False,
             "api_key": "", "api_secret": "", "passphrase": "",
             "tokens": ["SOLUSDT","ETHUSDT","XRPUSDT","DOGEUSDT"],
-            "leverage": 3, "usdt_per_trade": 30,
+            "leverage": 3, "usdt_per_trade": 30, "budget_usdt": 0,
             "risk_pct": 3.0,
             "use_risk_pct": True,
             "stop_loss_pct": 0.010, "take_profit_pct": 0.020,
@@ -343,6 +343,7 @@ class BitgetClient:
         self.sec   = api_secret
         self.pass_ = passphrase
         self.live  = live_mode
+        self._acct = None   # 'classic' | 'uta' | None (noch nicht erkannt)
 
     def _sign(self, ts, method, path, body=""):
         msg = str(ts) + method.upper() + path + (body or "")
@@ -393,16 +394,103 @@ class BitgetClient:
                 if attempt < retries - 1: time.sleep(2)
         return {}
 
+    # ── UTA (Unified Trading Account) SUPPORT ─────────────────
+    # Bitget stellt Konten zunehmend auf den Unified Trading Account (UTA) um.
+    # UTA-Keys koennen die klassischen /api/v2/mix-Endpunkte NICHT aufrufen (und
+    # umgekehrt). Auth/Signatur sind bei v2 und v3 identisch - nur die Pfade
+    # unterscheiden sich. Wir erkennen den Kontotyp EINMALIG und routen die
+    # Konto-/Positions-Abfragen passend. So laeuft der Bot fuer Classic UND UTA.
+    UTA_CATEGORY = "USDT-FUTURES"
+
+    def is_uta(self):
+        """Erkennt (und cacht pro Client) ob dieser Key ein Unified Trading Account ist.
+        Strategie: UTA-Assets-Endpunkt probieren - code 00000 => UTA, sonst Classic."""
+        if self._acct is None:
+            try:
+                r = self.get("/api/v3/account/assets", {}, retries=1)
+                self._acct = "uta" if str(r.get("code")) == "00000" else "classic"
+            except Exception:
+                self._acct = "classic"
+            log.info(f"Bitget-Kontotyp erkannt: {self._acct.upper()} "
+                     f"({'DEMO' if not self.live else 'LIVE'})")
+        return self._acct == "uta"
+
+    def _uta_assets(self, retries=3):
+        """Liste der Unified-Assets: [{coin, available, balance, equity, ...}]."""
+        for _ in range(retries):
+            r = self.get("/api/v3/account/assets", {})
+            d = r.get("data", {})
+            arr = d.get("assets", d) if isinstance(d, dict) else d
+            if isinstance(arr, list):
+                return arr
+            time.sleep(1)
+        return []
+
+    def _uta_positions(self, symbol=None):
+        params = {"category": self.UTA_CATEGORY}
+        if symbol:
+            params["symbol"] = symbol
+        r = self.get("/api/v3/position/current-position", params)
+        d = r.get("data", {})
+        lst = d.get("list", d) if isinstance(d, dict) else d
+        return lst if isinstance(lst, list) else []
+
+    @staticmethod
+    def _norm_uta_pos(p):
+        """UTA-Positionsfelder auf die KLASSISCHEN Feldnamen mappen, damit der restliche
+        Code (holdSide/total/openPriceAvg/unrealizedPL/...) unveraendert weiterlaeuft."""
+        return {
+            "symbol":           p.get("symbol", ""),
+            "holdSide":         p.get("posSide", ""),
+            "total":            p.get("total", "0"),
+            "openPriceAvg":     p.get("avgPrice", "0"),
+            "unrealizedPL":     p.get("unrealisedPnl", "0"),
+            "leverage":         p.get("leverage", ""),
+            "liquidationPrice": p.get("liquidationPrice", "0"),
+            "marginSize":       p.get("positionBalance", "0"),
+        }
+
+    def all_positions(self):
+        """Alle offenen Positionen (Classic ODER UTA), auf klassische Felder normalisiert."""
+        if self.is_uta():
+            return [self._norm_uta_pos(p) for p in self._uta_positions()
+                    if float(p.get("total", 0) or 0) > 0]
+        r = self.get("/api/v2/mix/position/all-position",
+                     {"productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN})
+        return [p for p in r.get("data", []) if float(p.get("total", 0) or 0) > 0]
+
     def balance(self, retries=4):
+        if self.is_uta():
+            for _ in range(retries):
+                for a in self._uta_assets(retries=1):
+                    if a.get("coin") == MARGIN_COIN:
+                        return float(a.get("available", 0) or 0)
+                time.sleep(2)
+            log.warning(f"balance(): UTA, kein {MARGIN_COIN}-Guthaben in den Unified-Assets gefunden")
+            return 0.0
+        last = None
         for _ in range(retries):
             r = self.get("/api/v2/mix/account/accounts",
                 {"productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN})
+            last = r
             try:
                 for acc in r.get("data", []):
                     if acc.get("marginCoin") == MARGIN_COIN:
                         return float(acc.get("available", 0))
             except: pass
             time.sleep(2)
+        # Kein passendes Konto gefunden -> Roh-Antwort loggen (enthaelt KEINE Secrets).
+        # Haeufigste Ursache: im DEMO-Modus wurde ein LIVE-API-Key eingetragen. Bitget-Demo
+        # braucht einen SEPARATEN Demo-API-Key (sonst 'exchange environment is incorrect'
+        # bzw. leere Daten). Sonst: fehlende Read-Rechte / falscher Sub-Account.
+        try:
+            log.warning(f"balance(): kein {MARGIN_COIN}-Guthaben gefunden "
+                        f"({'DEMO' if not self.live else 'LIVE'}) | "
+                        f"code={last.get('code') if isinstance(last,dict) else '?'} "
+                        f"msg={last.get('msg') if isinstance(last,dict) else '?'} "
+                        f"resp={str(last)[:200]}")
+        except Exception:
+            pass
         return 0.0
 
     def price(self, symbol):
@@ -432,6 +520,11 @@ class BitgetClient:
         except: return 0.0
 
     def position(self, symbol):
+        if self.is_uta():
+            for p in self._uta_positions(symbol):
+                if float(p.get("total", 0) or 0) > 0:
+                    return self._norm_uta_pos(p)
+            return None
         r = self.get("/api/v2/mix/position/single-position", {
             "symbol": symbol, "productType": PRODUCT_TYPE,
             "marginCoin": MARGIN_COIN,
@@ -469,12 +562,34 @@ class BitgetClient:
             log.warning(f"fetch_market_precision Fehler: {e} – nutze Fallback-Werte")
 
     def validate(self):
-        """Testet die API-Verbindung. Gibt (ok, nachricht) zurueck."""
+        """Testet die API-Verbindung und wertet den ECHTEN Bitget-Code aus, damit Fehler
+        (falscher Key, Demo/Live-Mismatch, Classic/Unified-Mismatch, fehlende Rechte)
+        sichtbar werden statt 'OK: 0.00'."""
+        env = "DEMO" if not self.live else "LIVE"
         try:
-            bal = self.balance(retries=1)
-            return True, f"Verbindung OK – Balance: {bal:.2f} USDT"
+            if self.is_uta():
+                bal = self.balance(retries=1)
+                return True, f"[{env}/UTA] Verbindung OK - Guthaben: {bal:.2f} {MARGIN_COIN}"
+            r = self.get("/api/v2/mix/account/accounts",
+                         {"productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN}, retries=1)
+            code = str(r.get("code", "")) if isinstance(r, dict) else ""
+            if code and code != "00000":
+                msg = str(r.get("msg", "?"))
+                hint = ""
+                if any(k in msg.lower() for k in ("unified", "uta", "environment")):
+                    hint = (" | Konto ist ein UNIFIED ACCOUNT - der Bot nutzt die klassische "
+                            "Futures-API. Konto auf CLASSIC umstellen + Classic-API-Key nutzen.")
+                return False, f"[{env}] API-Fehler {code}: {msg}{hint}"
+            found, bal = False, 0.0
+            for acc in (r.get("data", []) if isinstance(r, dict) else []):
+                if acc.get("marginCoin") == MARGIN_COIN:
+                    bal = float(acc.get("available", 0)); found = True
+            if not found:
+                return False, (f"[{env}] Verbunden, aber KEIN {MARGIN_COIN}-Futures-Guthaben gefunden. "
+                               f"Meist: Unified Account (Bot braucht CLASSIC) oder falscher Sub-Account.")
+            return True, f"[{env}/CLASSIC] Verbindung OK - Futures-Balance: {bal:.2f} USDT"
         except Exception as e:
-            return False, f"Verbindungsfehler: {e}"
+            return False, f"[{env}] Verbindungsfehler: {e}"
 
     # ── SPOT-MARKT METHODEN ───────────────────────────────────
     def spot_price(self, symbol):
@@ -484,7 +599,13 @@ class BitgetClient:
         except: return 0.0
 
     def spot_balance(self, coin):
-        """Verfuegbares Guthaben einer Spot-Coin (z.B. 'BTC', 'USDT')."""
+        """Verfuegbares Guthaben einer Coin. UTA: aus den Unified-Assets (Spot+Futures
+        gemeinsam), Classic: separates Spot-Wallet."""
+        if self.is_uta():
+            for a in self._uta_assets(retries=2):
+                if a.get("coin") == coin:
+                    return float(a.get("available", 0) or 0)
+            return 0.0
         r = self.get("/api/v2/spot/account/assets", {"coin": coin})
         try: return float(r["data"][0].get("available", 0))
         except: return 0.0
@@ -1098,11 +1219,8 @@ def fetch_all_positions():
         try:
             client = BitgetClient(bc["api_key"], bc["api_secret"],
                                   bc["passphrase"], live)
-            r = client.get("/api/v2/mix/position/all-position", {
-                "productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN
-            })
-            for pos in r.get("data", []):
-                if float(pos.get("total", 0)) <= 0: continue
+            # all_positions() erkennt Classic/UTA automatisch und normalisiert die Felder
+            for pos in client.all_positions():
                 all_pos.append({
                     "bot":    bot_id,
                     "symbol": pos.get("symbol","").replace("USDT",""),
@@ -1590,6 +1708,7 @@ def run_signal(flag):
     tokens       = bc.get("tokens", ["SOLUSDT","ETHUSDT","XRPUSDT","DOGEUSDT"])
     lever        = bc.get("leverage", 3)
     usdt_pt      = bc.get("usdt_per_trade", 30)
+    budget_usdt  = float(bc.get("budget_usdt", 0))   # 0 = kein Limit (volle Balance)
     risk_pct     = bc.get("risk_pct", 3.0)
     use_risk_pct = bc.get("use_risk_pct", True)
     sl_pct       = bc.get("stop_loss_pct", 0.010)
@@ -1766,8 +1885,11 @@ def run_signal(flag):
                     with plock:
                         pstate["bots"]["signal"]["tokens"][sym]["position"] = pos
 
-                    # Dynamische Position-Groesse
-                    trade_usdt = (bal * risk_pct / 100) if use_risk_pct else usdt_pt
+                    # Dynamische Position-Groesse (budget_usdt begrenzt die Basis, falls gesetzt)
+                    base_cap   = bal if budget_usdt <= 0 else min(bal, budget_usdt)
+                    trade_usdt = (base_cap * risk_pct / 100) if use_risk_pct else usdt_pt
+                    if budget_usdt > 0:
+                        trade_usdt = min(trade_usdt, budget_usdt)
 
                     # ATR-basierter SL/TP
                     def calc_sl_tp(px, direction):
@@ -1786,6 +1908,19 @@ def run_signal(flag):
                         if open_pos_count >= max_conc:
                             blog("signal",f"{cur}: Max. Positionen ({max_conc}) erreicht – kein neuer Trade","WARN")
                             return
+                        # Budget-Limit pro Bot: bereits gebundene Margin summieren und keinen
+                        # Trade eroeffnen, der das eingestellte Budget sprengt (harte Obergrenze).
+                        this_trade = trade_usdt
+                        if budget_usdt > 0:
+                            with plock:
+                                used = sum(float((pstate["bots"]["signal"]["tokens"].get(s,{})
+                                            .get("position") or {}).get("marginSize", 0) or 0)
+                                           for s in tokens)
+                            free = budget_usdt - used
+                            if free <= 1:
+                                blog("signal",f"{cur}: Budget {budget_usdt:.0f} USDT ausgeschoepft ({used:.0f} gebunden) – kein neuer Trade","WARN")
+                                return
+                            this_trade = min(trade_usdt, free)
                         # Korrelations-Filter: keine neue Position, die zu stark mit einer
                         # bereits offenen zusammenhaengt (geballtes Risiko). Fail-open.
                         if use_corr_filter and corr_data:
@@ -1795,10 +1930,10 @@ def run_signal(flag):
                                 return
                         px = client.price(sym)
                         if px <= 0: return
-                        qs   = fmt_q(sym, (trade_usdt * lever) / px)
+                        qs   = fmt_q(sym, (this_trade * lever) / px)
                         # Order-Sanity-Check (Lehre vom MT5-Bot): keine 0-Menge, keine
                         # stark ueberdimensionierte Order senden.
-                        ok_sz, why = _size_check(qs, px, trade_usdt * lever)
+                        ok_sz, why = _size_check(qs, px, this_trade * lever)
                         if not ok_sz:
                             blog("signal",f"{cur}: Order abgebrochen – {why} (Menge '{qs}')","ERROR")
                             return
@@ -1818,7 +1953,7 @@ def run_signal(flag):
                             open_positions.append((sym, direction))
                             with plock:
                                 pstate["bots"]["signal"]["trade_count"] += 1
-                            blog("signal",f"{cur}: {direction} @ {px:.2f} | SL={sl:.2f} TP={tp:.2f} ({trade_usdt:.0f} USDT)","TRADE")
+                            blog("signal",f"{cur}: {direction} @ {px:.2f} | SL={sl:.2f} TP={tp:.2f} ({this_trade:.0f} USDT)","TRADE")
                             # SL/TP-Waechter: sicherstellen dass die Position wirklich geschuetzt ist
                             if use_sltp_guard:
                                 _ensure_sltp(client, sym, direction, sl, tp, qs)
@@ -3495,6 +3630,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label>Leverage (1-10)</label><input type="number" id="sig-lever" placeholder="3" min="1" max="10"></div>
         <div class="field-row"><label data-i18n="lbl_risk_trade">Risiko pro Trade (%)</label><input type="number" id="sig-risk-pct" placeholder="3.0" step="0.5" min="0.5" max="10"></div>
         <div class="field-row"><label data-i18n="lbl_usdt_trade">USDT pro Trade (fallback)</label><input type="number" id="sig-usdt" placeholder="30" min="5"></div>
+        <div class="field-row"><label data-i18n="lbl_budget">Budget (USDT, 0=kein Limit)</label><input type="number" id="sig-budget" placeholder="0" min="0"></div>
         <div class="field-row"><label data-i18n="lbl_max_conc">Max. gleichzeitige Pos.</label><input type="number" id="sig-max-conc" placeholder="2" min="1" max="4"></div>
         <div class="field-row"><label data-i18n="lbl_corr_filter">Korrelations-Filter</label><input type="checkbox" id="sig-corr-filter" style="width:auto"></div>
         <div class="field-row"><label data-i18n="lbl_max_corr">Max. Korrelation (0.5-1.0)</label><input type="number" id="sig-max-corr" placeholder="0.85" step="0.05" min="0.5" max="1.0"></div>
@@ -3769,7 +3905,7 @@ const STRINGS = {
     set_presets_head:'Strategie-Vorlagen (Presets)',
     set_presets_hint:'Presets fuellen die Signal- und Grid-Bot-Felder automatisch aus. Danach noch API Keys eintragen.',
     set_auth_head:'Dashboard-Zugang',
-    set_auth_hint:'Beim ersten Start wurde ein zufaelliges Passwort generiert (siehe platform.log). Hier aendern und SPEICHERN nicht vergessen - danach fragt der Browser beim naechsten Laden neu nach Login.',
+    set_auth_hint:'Benutzername und Passwort legst du beim ersten Start SELBST fest (Abfrage im Terminal bzw. Setup-Assistent im Browser). Hier kannst du sie jederzeit aendern - dann SPEICHERN, danach fragt der Browser beim naechsten Laden neu nach Login.',
     lbl_user:'Benutzername', lbl_pass:'Passwort', ph_pass_unchanged:'Leer lassen = unveraendert',
     set_global_head:'Globale API-Keys',
     set_global_hint:'Wichtig: Nach dem Eintragen immer unten auf SPEICHERN klicken, dann START druecken.',
@@ -3777,7 +3913,7 @@ const STRINGS = {
     ph_tg_chat:'Deine Chat-ID (z.B. 123456789)',
     set_notify_note:'Telegram: @BotFather → /newbot → Token. Chat-ID von @userinfobot.<br>Discord: Server-Einstellungen → Integrationen → Webhooks → URL kopieren.<br>Beide koennen gleichzeitig aktiv sein. News-Sentiment: CoinGecko (kostenlos, kein Key).',
     set_preset:'Preset:', bp_cons:'KONSERVATIV', bp_std:'STANDARD', bp_agg:'AGGRESSIV',
-    lbl_risk_trade:'Risiko pro Trade (%)', lbl_usdt_trade:'USDT pro Trade (fallback)',
+    lbl_risk_trade:'Risiko pro Trade (%)', lbl_usdt_trade:'USDT pro Trade (fallback)', lbl_budget:'Budget (USDT, 0=kein Limit)',
     lbl_max_conc:'Max. gleichzeitige Pos.', lbl_corr_filter:'Korrelations-Filter', lbl_max_corr:'Max. Korrelation (0.5-1.0)',
     note_corr:'Korrelations-Filter: verhindert, dass der Bot eine neue Position eroeffnet, die zu stark mit einer bereits offenen, gleichgerichteten Position korreliert (Diversifikation). Bei fehlenden Daten wird normal weitergehandelt.',
     lbl_adx_filter:'ADX-Trendfilter', lbl_min_adx:'Min. ADX (10-40)',
@@ -3899,7 +4035,7 @@ const STRINGS = {
     set_presets_head:'Strategy presets',
     set_presets_hint:'Presets auto-fill the Signal and Grid bot fields. Then just enter your API keys.',
     set_auth_head:'Dashboard access',
-    set_auth_hint:'A random password was generated on first start (see platform.log). Change it here and remember to SAVE — the browser will then ask for the new login on next load.',
+    set_auth_hint:'You choose your own username and password on first start (terminal prompt or browser setup wizard). You can change them here anytime — click SAVE, then the browser asks for the new login on next load.',
     lbl_user:'Username', lbl_pass:'Password', ph_pass_unchanged:'Leave empty = unchanged',
     set_global_head:'Global API keys',
     set_global_hint:'Important: Always click SAVE below after entering keys, then press START.',
@@ -3907,7 +4043,7 @@ const STRINGS = {
     ph_tg_chat:'Your chat ID (e.g. 123456789)',
     set_notify_note:'Telegram: @BotFather → /newbot → token. Chat ID from @userinfobot.<br>Discord: Server settings → Integrations → Webhooks → copy URL.<br>Both can be active at once. News sentiment: CoinGecko (free, no key).',
     set_preset:'Preset:', bp_cons:'CONSERVATIVE', bp_std:'STANDARD', bp_agg:'AGGRESSIVE',
-    lbl_risk_trade:'Risk per trade (%)', lbl_usdt_trade:'USDT per trade (fallback)',
+    lbl_risk_trade:'Risk per trade (%)', lbl_usdt_trade:'USDT per trade (fallback)', lbl_budget:'Budget (USDT, 0=no limit)',
     lbl_max_conc:'Max simultaneous pos.', lbl_corr_filter:'Correlation filter', lbl_max_corr:'Max correlation (0.5-1.0)',
     note_corr:'Correlation filter: prevents the bot from opening a new position that is too strongly correlated with an already-open one in the same direction (diversification). When data is missing it keeps trading as normal.',
     lbl_adx_filter:'ADX trend filter', lbl_min_adx:'Min ADX (10-40)',
@@ -5850,6 +5986,7 @@ function fillSettingsForm(state) {
     document.getElementById('sig-lever').value      = s(b.signal?.leverage||3);
     document.getElementById('sig-risk-pct').value   = s(b.signal?.risk_pct||3.0);
     document.getElementById('sig-usdt').value        = s(b.signal?.usdt_per_trade||30);
+    document.getElementById('sig-budget').value      = s(b.signal?.budget_usdt ?? 0);
     document.getElementById('sig-max-conc').value    = s(b.signal?.max_concurrent||2);
     document.getElementById('sig-corr-filter').checked = (b.signal?.use_correlation_filter !== false);
     document.getElementById('sig-max-corr').value    = s(b.signal?.max_correlation ?? 0.85);
@@ -5902,6 +6039,7 @@ async function saveSettings() {
         risk_pct:         num('sig-risk-pct') || 3.0,
         use_risk_pct:     true,
         usdt_per_trade:   num('sig-usdt')     || 30,
+        budget_usdt:      num('sig-budget'),
         max_concurrent:   int('sig-max-conc') || 2,
         use_correlation_filter: document.getElementById('sig-corr-filter')?.checked ?? true,
         max_correlation:  num('sig-max-corr') || 0.85,
@@ -6377,11 +6515,14 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/validate":
             try:
                 bot_id = data.get("bot_id", "")
+                # Im selben Modus testen, in dem die Bots laufen (vorher hart DEMO -> Live-Keys
+                # zeigten faelschlich 0/Fehler).
+                live   = load_config().get("live_mode", False)
                 client = BitgetClient(
                     data.get("api_key",""),
                     data.get("api_secret",""),
                     data.get("passphrase",""),
-                    live_mode=False
+                    live_mode=live
                 )
                 if bot_id == "dca":
                     # DCA nutzt Spot-Markt, nicht Futures
