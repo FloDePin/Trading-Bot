@@ -195,11 +195,12 @@ DEFAULT_CONFIG = {
 }
 
 _credentials_just_created = False  # verhindert doppelte Abfrage direkt nach der Ersteinrichtung
+_setup_notice_logged      = False  # headless: Setup-Hinweis nur einmal loggen (nicht pro Request)
 
 def _prompt_first_run_credentials():
     """Interaktive Ersteinrichtung: laesst den Nutzer Benutzername/Passwort selbst waehlen.
-    Nur moeglich wenn ein echtes Terminal angehaengt ist (sonst Fallback auf Auto-Generierung,
-    z.B. bei systemd/Hintergrund-Diensten ohne TTY)."""
+    Nur moeglich wenn ein echtes Terminal angehaengt ist. Ohne TTY (systemd/Hintergrund-
+    Dienste) laeuft die Ersteinrichtung stattdessen ueber den Web-Setup-Assistenten."""
     print("="*55)
     print("  Ersteinrichtung: Dashboard-Zugang festlegen")
     print("="*55)
@@ -222,7 +223,7 @@ def _prompt_first_run_credentials():
         return "admin", pw
 
 def load_config():
-    global _credentials_just_created
+    global _credentials_just_created, _setup_notice_logged
     is_new = not os.path.exists(CONFIG_FILE)
     if is_new:
         data = DEFAULT_CONFIG.copy()
@@ -241,18 +242,26 @@ def load_config():
     needs_save = is_new
     if not data.get("dashboard_password"):
         if sys.stdin.isatty():
+            # Interaktiver Start (manuell im Terminal): Zugang direkt abfragen.
             user, pw = _prompt_first_run_credentials()
             data["dashboard_user"]     = user
             data["dashboard_password"] = pw
-        else:
-            data["dashboard_password"] = secrets.token_urlsafe(12)
-        needs_save = True
-        _credentials_just_created = True
-        log.warning("="*55)
-        log.warning(f"  Dashboard-Zugang: user='{data.get('dashboard_user','admin')}' "
-                    f"password='{data['dashboard_password']}'")
-        log.warning("  Bitte merken/aendern (Settings -> Dashboard-Zugang).")
-        log.warning("="*55)
+            needs_save = True
+            _credentials_just_created = True
+            log.warning("="*55)
+            log.warning(f"  Dashboard-Zugang gesetzt: user='{data.get('dashboard_user','admin')}'")
+            log.warning("="*55)
+        elif not _setup_notice_logged:
+            # Headless (systemd o.ae.): KEIN Auto-Passwort mehr. Das Dashboard bleibt
+            # gesperrt und zeigt beim ersten Browser-Aufruf einen Setup-Assistenten,
+            # ueber den Benutzername + Passwort selbst vergeben werden.
+            # Nur einmal loggen - load_config() wird pro Web-Request aufgerufen.
+            _setup_notice_logged = True
+            log.warning("="*55)
+            log.warning("  Noch kein Dashboard-Zugang eingerichtet.")
+            log.warning(f"  Erst-Einrichtung im Browser: http://<PI-IP>:{DASHBOARD_PORT}")
+            log.warning("  Dort Benutzername + Passwort festlegen (Setup-Assistent).")
+            log.warning("="*55)
     if needs_save:
         with open(CONFIG_FILE, "w") as f:
             json.dump(data, f, indent=2)
@@ -289,6 +298,14 @@ def _verify_login_at_startup(cfg):
 def save_config(cfg):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
+
+def _setup_required():
+    """True, solange kein Dashboard-Passwort gesetzt ist (Erst-Einrichtung offen).
+    In diesem Zustand ist nur der Setup-Assistent erreichbar, alles andere gesperrt."""
+    try:
+        return not load_config().get("dashboard_password")
+    except Exception:
+        return False
 
 def dca_load_state(symbol):
     """Laedt den persistierten DCA-Stand (invested/qty/buys/last_buy) fuer ein Symbol.
@@ -5979,10 +5996,94 @@ if (_lang !== 'de') {
 </html>"""
 
 # ─────────────────────────────────────────────
+#  SETUP-ASSISTENT (Erst-Einrichtung im Browser, headless)
+# ─────────────────────────────────────────────
+SETUP_HTML = """<!doctype html>
+<html lang="de"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ersteinrichtung | Trading Platform</title>
+<style>
+  :root{--bg:#0b0e14;--card:#151a24;--border:#243044;--fg:#e6edf3;--muted:#8b97a7;
+        --accent:#3b82f6;--red:#f87171;--green:#34d399}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+       display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px}
+  .box{background:var(--card);border:1px solid var(--border);border-radius:12px;
+       padding:28px;max-width:420px;width:100%}
+  h1{font-size:18px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin:0 0 20px;line-height:1.5}
+  label{display:block;font-size:12px;font-weight:600;color:var(--muted);
+        margin:14px 0 6px;letter-spacing:.03em}
+  input{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--fg);
+        border-radius:8px;padding:11px 12px;font-size:14px}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{width:100%;margin-top:20px;background:var(--accent);color:#fff;border:0;
+         border-radius:8px;padding:12px;font-size:14px;font-weight:700;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .msg{margin-top:14px;font-size:13px;min-height:18px}
+  .err{color:var(--red)} .ok{color:var(--green)}
+  .hint{color:var(--muted);font-size:11px;margin-top:6px}
+</style></head>
+<body>
+  <div class="box">
+    <h1>Ersteinrichtung &middot; First-time setup</h1>
+    <p class="sub">Lege Benutzername und Passwort fuer das Dashboard fest.<br>
+       Set your dashboard username and password.</p>
+    <label>Benutzername / Username</label>
+    <input id="u" autocomplete="username" value="admin">
+    <label>Passwort / Password (min. 8)</label>
+    <input id="p" type="password" autocomplete="new-password">
+    <label>Passwort wiederholen / Confirm</label>
+    <input id="p2" type="password" autocomplete="new-password">
+    <button id="btn" onclick="submit()">Speichern &amp; einloggen / Save &amp; log in</button>
+    <div class="msg" id="msg"></div>
+    <div class="hint">Danach fragt der Browser nach diesen Zugangsdaten (HTTP Basic Auth).</div>
+  </div>
+<script>
+function submit(){
+  var u=document.getElementById('u').value.trim();
+  var p=document.getElementById('p').value;
+  var p2=document.getElementById('p2').value;
+  var msg=document.getElementById('msg'); var btn=document.getElementById('btn');
+  msg.className='msg'; msg.textContent='';
+  if(!u){msg.className='msg err';msg.textContent='Benutzername fehlt / Username required';return;}
+  if(p.length<8){msg.className='msg err';msg.textContent='Passwort min. 8 Zeichen / Password min 8 chars';return;}
+  if(p!==p2){msg.className='msg err';msg.textContent='Passwoerter stimmen nicht ueberein / Passwords do not match';return;}
+  btn.disabled=true; msg.textContent='...';
+  fetch('/api/setup',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({dashboard_user:u,dashboard_password:p})})
+   .then(function(r){return r.json();})
+   .then(function(d){
+     if(d.status==='ok'){
+       msg.className='msg ok';
+       msg.textContent='Gespeichert. Neu laden & einloggen... / Saved. Reloading...';
+       setTimeout(function(){location.reload();},1500);
+     } else {
+       btn.disabled=false; msg.className='msg err';
+       msg.textContent=d.msg||'Fehler / Error';
+     }
+   })
+   .catch(function(){btn.disabled=false;msg.className='msg err';msg.textContent='Netzwerkfehler / Network error';});
+}
+document.getElementById('p2').addEventListener('keydown',function(e){if(e.key==='Enter')submit();});
+</script>
+</body></html>"""
+
+# ─────────────────────────────────────────────
 #  HTTP SERVER
 # ─────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
+
+    def _serve_setup(self):
+        html = SETUP_HTML.encode()
+        self.send_response(200)
+        self.send_header("Content-Type","text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(html)))
+        self.end_headers()
+        self.wfile.write(html)
 
     def _json(self, data, code=200):
         body = json.dumps(data, default=str).encode()
@@ -6018,6 +6119,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        # Erst-Einrichtung offen: nur den Setup-Assistenten ausliefern, sonst alles sperren.
+        if _setup_required():
+            if self.path.startswith("/api/"):
+                self._json({"status":"setup_required"}, 403)
+            else:
+                self._serve_setup()
+            return
         if not self._check_auth():
             self._deny_auth(); return
         if self.path == "/api/state":
@@ -6066,16 +6174,46 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(html)
 
     def do_POST(self):
-        if not self._check_auth():
-            self._deny_auth(); return
+        setup = _setup_required()
+        # Solange die Erst-Einrichtung offen ist, ist NUR /api/setup erreichbar (ohne Auth).
+        # Ist sie abgeschlossen, gibt es /api/setup nicht mehr (kein spaeteres Zuruecksetzen).
+        if setup:
+            if self.path != "/api/setup":
+                self._json({"status":"setup_required"}, 403); return
+        else:
+            if self.path == "/api/setup":
+                self._json({"status":"error","msg":"Bereits eingerichtet"}, 403); return
+            if not self._check_auth():
+                self._deny_auth(); return
         length = int(self.headers.get("Content-Length",0))
         body   = self.rfile.read(length).decode("utf-8")
         try:   data = json.loads(body)
         except:data = {}
         try:
-            self._dispatch_post(data)
+            if setup:
+                self._handle_setup(data)
+            else:
+                self._dispatch_post(data)
         except Exception as e:
             self._json({"status":"error","msg":f"Ungueltige Anfrage: {e}"}, 400)
+
+    def _handle_setup(self, data):
+        """Erst-Einrichtung: Benutzername + Passwort festlegen. Nur wirksam, solange
+        noch kein Passwort gesetzt ist (do_POST prueft das)."""
+        user = str(data.get("dashboard_user","")).strip()
+        pw   = str(data.get("dashboard_password",""))
+        if not user:
+            self._json({"status":"error","msg":"Benutzername fehlt / Username required"}, 400); return
+        if len(pw) < 8:
+            self._json({"status":"error","msg":"Passwort min. 8 Zeichen / Password min 8 chars"}, 400); return
+        cfg = load_config()
+        cfg["dashboard_user"]     = user
+        cfg["dashboard_password"] = pw
+        save_config(cfg)
+        log.warning("="*55)
+        log.warning(f"  Dashboard-Zugang eingerichtet: user='{user}' (Setup-Assistent).")
+        log.warning("="*55)
+        self._json({"status":"ok"})
 
     def _dispatch_post(self, data):
         if self.path == "/api/config":
