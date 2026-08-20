@@ -29,6 +29,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("Platform")
 
+# Zeitpunkt des Prozess-Starts (fuer die Laufzeit-Anzeige im Dashboard).
+PLATFORM_START = time.time()
+
 # ─────────────────────────────────────────────
 #  KONFIGURATION
 # ─────────────────────────────────────────────
@@ -179,6 +182,11 @@ DEFAULT_CONFIG = {
             "api_key": "", "api_secret": "", "passphrase": "",
             "symbol": "BTCUSDT", "upper_price": 0.0, "lower_price": 0.0,
             "grid_count": 10, "investment": 100.0, "check_interval": 10,
+            "step_size": 0.0,   # Ziel-Stufengroesse USDT (0 = aus -> upper/lower bzw. Smart-Range)
+            "seed_position": True,  # beim Start Grundbestand aufbauen (echtes Grid, tradet in beide Richtungen)
+            "smart_range_hours": 24,  # Rueckblick fuer die Smart-Range (Hoch/Tief der letzten N Stunden)
+            "leverage": 0,      # 0 = Konto-Hebel unveraendert lassen; >0 = Grid setzt diesen Hebel beim Start
+            "stop_loss_pct": 0.0,  # 0 = aus; >0 = schliesst+stoppt, wenn Preis X% unter die Untergrenze faellt
         },
         "dca": {
             "name": "DCA Bot", "enabled": False, "autostart": False,
@@ -525,10 +533,10 @@ class BitgetClient:
         try: return float(r["data"][0]["lastPr"])
         except: return 0.0
 
-    def klines(self, symbol, limit=100):
+    def klines(self, symbol, limit=100, granularity="1m"):
         r = self.get("/api/v2/mix/market/candles", {
             "symbol": symbol, "productType": PRODUCT_TYPE,
-            "granularity": "1m", "limit": str(limit),
+            "granularity": granularity, "limit": str(limit),
         })
         opens, highs, lows, closes, vols = [], [], [], [], []
         for c in reversed(r.get("data", [])):
@@ -1710,12 +1718,12 @@ pstate = {
     "bots": {
         "signal":  {"status":"STOPPED","balance":0.0,"start_bal":0.0,"pnl":0.0,"pnl_pct":0.0,
                     "trade_count":0,"wins":0,"logs":[],"tokens":{},"blackout":False,
-                    "macro_events":[],"last_update":""},
+                    "macro_events":[],"last_update":"","started_at":0},
         "grid":    {"status":"STOPPED","balance":0.0,"start_bal":0.0,"pnl":0.0,
                     "trade_count":0,"filled":0,"logs":[],"grid_orders":[],
-                    "symbol":"","upper":0,"lower":0,"last_update":""},
+                    "symbol":"","upper":0,"lower":0,"last_update":"","started_at":0},
         "dca":     {"status":"STOPPED","balance":0.0,"start_bal":0.0,"pnl":0.0,
-                    "invested":0.0,"buys":0,"avg_price":0.0,"next_buy":"","logs":[],"last_update":""},
+                    "invested":0.0,"buys":0,"avg_price":0.0,"next_buy":"","logs":[],"last_update":"","started_at":0},
     },
     "grid_instances": {},
     "live_mode": False,
@@ -1824,6 +1832,8 @@ def run_signal(flag):
     fee_rate     = 0.0004  # Bitget Taker Fee (0.04%)
     win_streak   = 0
     loss_streak  = 0
+    realized_pnl = 0.0   # PnL aus abgeschlossenen Trades DIESES Laufs (kontounabhaengig)
+    last_unreal  = 0.0   # unrealisierter PnL der offenen Signal-Positionen (vom letzten Zyklus)
 
     with plock:
         for t in tokens:
@@ -1846,7 +1856,7 @@ def run_signal(flag):
     start_bal = client.balance(retries=5)
     with plock:
         pstate["bots"]["signal"].update({
-            "status":"RUNNING","balance":start_bal,"start_bal":start_bal})
+            "status":"RUNNING","balance":start_bal,"start_bal":start_bal,"started_at":time.time()})
     blog("signal", f"Start: {start_bal:.2f} USDT | ATR-SL: {'ja' if use_atr_sl else 'nein'} | Risk: {risk_pct if use_risk_pct else usdt_pt} {'%' if use_risk_pct else 'USDT'}")
 
     while not flag["stop"]:
@@ -1882,7 +1892,10 @@ def run_signal(flag):
             fkey            = _cfg.get("finnhub_key","")
 
             bal = client.balance(retries=3) or start_bal
-            pnl = bal - start_bal
+            # PnL aus EIGENEN Trades (realisiert + unrealisiert), NICHT aus der Kontostand-
+            # Differenz - sonst leckt bei geteiltem Konto der PnL anderer Bots hier rein
+            # (Signal zeigte sonst "0 Trades, aber +X"). realized/last_unreal werden unten gepflegt.
+            pnl = realized_pnl + last_unreal
             pct = pnl / start_bal if start_bal > 0 else 0
             db_save_pnl("signal", pnl, bal)
             with plock:
@@ -1931,6 +1944,7 @@ def run_signal(flag):
                     corr_data = None
                     blog("signal", f"Korrelations-Check nicht verfuegbar (handle normal weiter): {e}", "WARN")
 
+            cycle_unreal = 0.0   # unrealisierter PnL aller offenen Signal-Positionen dieses Zyklus
             for sym in tokens:
                 try:
                     _, highs, lows, closes, vols = client.klines(sym, 100)
@@ -2079,6 +2093,7 @@ def run_signal(flag):
                             psize = float(pos.get("total", 0))
                             fee   = (entry + price_now) * psize * fee_rate
                             net   = upnl - fee
+                            realized_pnl += net
                             db_save_trade("signal", cur, ps, entry, round(price_now,4),
                                           round(net,4), fee=round(fee,6), size=psize)
                             if net > 0: win_streak += 1; loss_streak = 0
@@ -2090,6 +2105,9 @@ def run_signal(flag):
                             open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
                             blog("signal",f"{cur}: Position gedreht","TRADE")
                             if not blackout: _open(sig)
+                        else:
+                            # Position bleibt offen -> unrealisierten PnL fuer die Anzeige mitzaehlen
+                            cycle_unreal += float(pos.get("unrealizedPL", 0) or 0)
                     else:
                         # Pruefe ob eine zuvor offene Position seit dem letzten Zyklus
                         # durch SL/TP (oder manuell) geschlossen wurde
@@ -2103,6 +2121,7 @@ def run_signal(flag):
                             # sonst zieht die DB fast keine Gebuehren ab (zu optimistischer PnL).
                             fee   = (entry + price_now) * psize * fee_rate
                             net   = upnl - fee
+                            realized_pnl += net
                             db_save_trade("signal", cur, ps, entry, round(price_now,4),
                                           round(net,4), fee=round(fee,6), size=psize)
                             if net > 0:
@@ -2121,16 +2140,47 @@ def run_signal(flag):
                     time.sleep(0.5)
                 except Exception as e:
                     blog("signal",f"{sym}: {e}","ERROR")
+            # Zyklus-Ende: PnL = realisiert (diesen Lauf) + unrealisiert (offene Positionen).
+            # Kontounabhaengig -> kein Leck mehr von anderen Bots auf demselben Konto.
+            last_unreal = cycle_unreal
+            with plock:
+                _pnl = round(realized_pnl + cycle_unreal, 2)
+                pstate["bots"]["signal"]["pnl"]     = _pnl
+                pstate["bots"]["signal"]["pnl_pct"] = round((_pnl/start_bal*100) if start_bal > 0 else 0, 2)
         except Exception as e:
             blog("signal",f"Loop: {e}","ERROR")
         time.sleep(check)
 
-    with plock: pstate["bots"]["signal"]["status"] = "STOPPED"
+    with plock:
+        pstate["bots"]["signal"]["status"] = "STOPPED"
+        pstate["bots"]["signal"]["started_at"] = 0
     blog("signal","Gestoppt.")
 
 # ─────────────────────────────────────────────
 #  GRID BOT
 # ─────────────────────────────────────────────
+def grid_smart_range(client, sym, hours, cur_price):
+    """Smart-Range: leitet die Grid-Range aus dem echten Hoch/Tief der letzten `hours`
+    Stunden ab (1H-Kerzen) statt einer stumpfen +-5%-Spanne. Fuegt 10% Puffer je Seite an
+    und garantiert, dass der aktuelle Preis mit etwas Luft in der Range liegt.
+    Gibt (lower, upper) zurueck, oder (0.0, 0.0) wenn keine sinnvollen Daten da sind."""
+    try:
+        hours = max(6, min(168, int(hours)))
+        _o, highs, lows, _c, _v = client.klines(sym, limit=hours, granularity="1H")
+        if len(highs) < 3 or len(lows) < 3:
+            return 0.0, 0.0
+        hi, lo = max(highs), min(lows)
+        if hi <= lo:
+            return 0.0, 0.0
+        pad = (hi - lo) * 0.10
+        lo -= pad; hi += pad
+        if cur_price > 0:                      # Preis mit etwas Luft einschliessen
+            lo = min(lo, cur_price * 0.98)
+            hi = max(hi, cur_price * 1.02)
+        return lo, hi
+    except Exception:
+        return 0.0, 0.0
+
 def run_grid(flag):
     cfg    = load_config()
     bc     = cfg["bots"]["grid"]
@@ -2142,16 +2192,39 @@ def run_grid(flag):
     n      = max(2, int(bc.get("grid_count",10)))
     invest = float(bc.get("investment",100))
     check  = int(bc.get("check_interval",10))
+    step_size = float(bc.get("step_size", 0))       # Ziel-Stufengroesse USDT (0 = aus)
+    seed_pos  = bc.get("seed_position", True)         # Grundbestand beim Start aufbauen
+    sr_hours  = int(bc.get("smart_range_hours", 24))  # Rueckblick fuer die Smart-Range
+    grid_lev  = int(bc.get("leverage", 0))            # 0 = Konto-Hebel lassen; >0 = selbst setzen
+    sl_pct    = float(bc.get("stop_loss_pct", 0))     # 0 = aus; >0 = Notausstieg unter der Untergrenze
 
     start_bal = client.balance(retries=5)
     client.fetch_market_precision(TICK_DEC, MIN_QTY)
+    if grid_lev > 0:
+        try:
+            client.set_leverage(sym, grid_lev)
+            blog("grid", f"Hebel {grid_lev}x gesetzt")
+        except Exception as e:
+            blog("grid", f"Hebel setzen fehlgeschlagen ({e}) - Konto-Hebel bleibt", "WARN")
     cur_price = client.price(sym)
 
     if upper == 0 or lower == 0 or upper <= lower:
-        if cur_price > 0:
-            upper = cur_price * 1.05
-            lower = cur_price * 0.95
-            blog("grid",f"Auto-Range: {lower:.2f} - {upper:.2f}")
+        if step_size > 0 and cur_price > 0:
+            # Range so waehlen, dass jede Stufe genau step_size USDT gross ist (um den akt. Preis zentriert).
+            span  = step_size * n
+            lower = max(cur_price - span/2, cur_price * 0.05)
+            upper = cur_price + span/2
+            blog("grid",f"Range aus Stufengroesse {step_size:g} USDT: {lower:.2f} - {upper:.2f}")
+        else:
+            # Smart-Range: echtes Hoch/Tief der letzten sr_hours Stunden (statt stumpf +-5%).
+            lo, hi = grid_smart_range(client, sym, sr_hours, cur_price)
+            if hi > lo > 0:
+                lower, upper = lo, hi
+                blog("grid",f"Smart-Range aus {sr_hours}h Hoch/Tief: {lower:.2f} - {upper:.2f}")
+            elif cur_price > 0:
+                upper = cur_price * 1.05
+                lower = cur_price * 0.95
+                blog("grid",f"Auto-Range (Fallback): {lower:.2f} - {upper:.2f}")
 
     step    = (upper - lower) / n
     levels  = [lower + i * step for i in range(n + 1)]
@@ -2169,6 +2242,7 @@ def run_grid(flag):
     # Persistierten Grid-Stand laden - nur wenn die Konfiguration identisch ist (sonst passen
     # die gespeicherten Level-Indizes nicht mehr). So laeuft der Grid nach Neustart weiter.
     sig_key = f"{sym}|{round(upper,4)}|{round(lower,4)}|{n}"
+    resumed = False
     _st = grid_load_state("grid")
     if _st and _st.get("key") == sig_key:
         net_qty     = float(_st.get("net_qty", 0))
@@ -2176,24 +2250,60 @@ def run_grid(flag):
         current_idx = int(_st.get("current_idx", current_idx))
         pnl         = float(_st.get("pnl", 0))
         trades      = int(_st.get("trades", 0))
+        resumed     = True
         blog("grid", f"Fortgesetzt aus grid_state.json: {len(held)} offene Level, net_qty={net_qty:.6f}")
 
     def _persist_grid():
         grid_save_state("grid", {"key": sig_key, "net_qty": net_qty, "held": held,
                                  "current_idx": current_idx, "pnl": round(pnl, 6), "trades": trades})
 
+    # Startbestand aufbauen: beim frischen Start (kein gespeicherter Stand) einmalig den
+    # Bestand fuer alle Levels UEBER dem aktuellen Preis kaufen. So kann der Grid sofort in
+    # BEIDE Richtungen handeln - verkaufen beim Steigen, nachkaufen beim Fallen. Ohne diesen
+    # Grundbestand tradet ein von unten startender Grid in einem steigenden Markt gar nicht.
+    if seed_pos and not resumed and cur_price > 0 and current_idx < n:
+        seed_lvls = list(range(current_idx + 1, n + 1))   # Levels, in die hinein verkauft wird
+        seed_qty  = qty_lvl * len(seed_lvls)
+        qss = fmt_q(sym, seed_qty)
+        ok_sz, why = _size_check(qss, cur_price, seed_qty * cur_price)
+        if not ok_sz:
+            blog("grid", f"Startbestand uebersprungen ({why}) - Grid handelt zunaechst nur bei fallendem Preis", "WARN")
+        else:
+            resp = client.place_futures_order(sym, "buy", qss, close=False)
+            if resp.get("code") == "00000":
+                net_qty = seed_qty
+                held    = list(seed_lvls)
+                trades += 1
+                _persist_grid()
+                blog("grid", f"Startbestand aufgebaut: {seed_qty:.6f} {sym.replace('USDT','')} ueber {len(seed_lvls)} Levels @ {cur_price:.2f}", "TRADE")
+            else:
+                blog("grid", f"Startbestand fehlgeschlagen: {resp.get('msg','')} - Grid handelt zunaechst nur bei fallendem Preis", "WARN")
+
+    _held0 = set(held)
     with plock:
         pstate["bots"]["grid"].update({
-            "status":"RUNNING","balance":start_bal,"start_bal":start_bal,
-            "symbol":sym,"upper":round(upper,2),"lower":round(lower,2),
-            "grid_orders":[{"price":round(l,2),"filled":False,"side":"BUY" if l<=(upper+lower)/2 else "SELL"} for l in levels],
+            "status":"RUNNING","balance":start_bal,"start_bal":start_bal,"started_at":time.time(),
+            "symbol":sym,"upper":round(upper,2),"lower":round(lower,2),"step":round(step,2),
+            "grid_orders":[{"price":round(l,2),"filled":(i in _held0),"side":"BUY" if l<=(upper+lower)/2 else "SELL"} for i,l in enumerate(levels)],
         })
-    blog("grid",f"Grid aktiv: {sym} | {n} Levels | {lower:.2f} - {upper:.2f} USDT")
+    blog("grid",f"Grid aktiv: {sym} | {n} Levels | {lower:.2f} - {upper:.2f} USDT | Stufe {step:.2f}")
 
     while not flag["stop"]:
         try:
             px = client.price(sym)
             if px <= 0: time.sleep(check); continue
+
+            # Notausstieg (opt-in): faellt der Preis stop_loss_pct unter die Untergrenze,
+            # Bestand schliessen und Grid stoppen (statt ins Bodenlose zu halten).
+            if sl_pct > 0 and net_qty > 0 and px <= lower * (1 - sl_pct):
+                qcl = fmt_q(sym, net_qty)
+                resp = client.place_futures_order(sym, "sell", qcl, close=True)
+                ok = resp.get("code") == "00000"
+                blog("grid", f"STOP-LOSS: Preis {px:.2f} unter {lower*(1-sl_pct):.2f} "
+                             f"({sl_pct*100:.1f}% unter Untergrenze) -> Bestand {'geschlossen' if ok else 'schliessen FEHLGESCHLAGEN: '+resp.get('msg','')}, Grid stoppt", "ERROR")
+                if ok:
+                    net_qty = 0.0; held = []; _persist_grid()
+                break
 
             # Preis faellt auf das naechste Level DARUNTER -> KAUFEN (open). Nur ein Schritt
             # pro Zyklus (bei schnellen Moves bewusst nur das naechste Level, s. DEPLOYMENT.md).
@@ -2257,7 +2367,9 @@ def run_grid(flag):
             blog("grid",f"Loop: {e}","ERROR")
         time.sleep(check)
 
-    with plock: pstate["bots"]["grid"]["status"] = "STOPPED"
+    with plock:
+        pstate["bots"]["grid"]["status"] = "STOPPED"
+        pstate["bots"]["grid"]["started_at"] = 0
     blog("grid","Gestoppt.")
 
 # ─────────────────────────────────────────────
@@ -2288,16 +2400,37 @@ def run_grid_instance(flag, inst_cfg, inst_id):
     n      = max(2, int(inst_cfg.get("grid_count",10)))
     invest = float(inst_cfg.get("investment",100))
     check  = int(inst_cfg.get("check_interval",10))
+    step_size = float(inst_cfg.get("step_size", 0))
+    seed_pos  = inst_cfg.get("seed_position", True)
+    sr_hours  = int(inst_cfg.get("smart_range_hours", 24))
+    grid_lev  = int(inst_cfg.get("leverage", 0))
+    sl_pct    = float(inst_cfg.get("stop_loss_pct", 0))
 
     start_bal = client.balance(retries=5)
     client.fetch_market_precision(TICK_DEC, MIN_QTY)
+    if grid_lev > 0:
+        try:
+            client.set_leverage(sym, grid_lev)
+            _ilog(inst_id, name, f"Hebel {grid_lev}x gesetzt")
+        except Exception as e:
+            _ilog(inst_id, name, f"Hebel setzen fehlgeschlagen ({e}) - Konto-Hebel bleibt", "WARN")
     cur_price = client.price(sym)
 
     if upper == 0 or lower == 0 or upper <= lower:
-        if cur_price > 0:
-            upper = cur_price * 1.05
-            lower = cur_price * 0.95
-            _ilog(inst_id, name, f"Auto-Range: {lower:.2f} - {upper:.2f}")
+        if step_size > 0 and cur_price > 0:
+            span  = step_size * n
+            lower = max(cur_price - span/2, cur_price * 0.05)
+            upper = cur_price + span/2
+            _ilog(inst_id, name, f"Range aus Stufengroesse {step_size:g} USDT: {lower:.2f} - {upper:.2f}")
+        else:
+            lo, hi = grid_smart_range(client, sym, sr_hours, cur_price)
+            if hi > lo > 0:
+                lower, upper = lo, hi
+                _ilog(inst_id, name, f"Smart-Range aus {sr_hours}h Hoch/Tief: {lower:.2f} - {upper:.2f}")
+            elif cur_price > 0:
+                upper = cur_price * 1.05
+                lower = cur_price * 0.95
+                _ilog(inst_id, name, f"Auto-Range (Fallback): {lower:.2f} - {upper:.2f}")
 
     step   = (upper - lower) / n
     levels = [lower + i * step for i in range(n+1)]
@@ -2312,6 +2445,7 @@ def run_grid_instance(flag, inst_cfg, inst_id):
 
     # Persistierten Stand dieser Instanz laden (nur bei identischer Konfiguration).
     sig_key = f"{sym}|{round(upper,4)}|{round(lower,4)}|{n}"
+    resumed = False
     _st = grid_load_state(inst_id)
     if _st and _st.get("key") == sig_key:
         net_qty     = float(_st.get("net_qty", 0))
@@ -2319,26 +2453,59 @@ def run_grid_instance(flag, inst_cfg, inst_id):
         current_idx = int(_st.get("current_idx", current_idx))
         pnl         = float(_st.get("pnl", 0))
         trades      = int(_st.get("trades", 0))
+        resumed     = True
         _ilog(inst_id, name, f"Fortgesetzt aus grid_state.json: {len(held)} offene Level")
 
     def _persist_grid():
         grid_save_state(inst_id, {"key": sig_key, "net_qty": net_qty, "held": held,
                                   "current_idx": current_idx, "pnl": round(pnl, 6), "trades": trades})
 
+    # Startbestand aufbauen (wie run_grid): einmalig beim frischen Start, damit die Instanz
+    # sofort in beide Richtungen handelt.
+    if seed_pos and not resumed and cur_price > 0 and current_idx < n:
+        seed_lvls = list(range(current_idx + 1, n + 1))
+        seed_qty  = qty_l * len(seed_lvls)
+        qss = fmt_q(sym, seed_qty)
+        ok_sz, why = _size_check(qss, cur_price, seed_qty * cur_price)
+        if not ok_sz:
+            _ilog(inst_id, name, f"Startbestand uebersprungen ({why}) - handelt zunaechst nur bei fallendem Preis", "WARN")
+        else:
+            resp = client.place_futures_order(sym, "buy", qss, close=False)
+            if resp.get("code") == "00000":
+                net_qty = seed_qty
+                held    = list(seed_lvls)
+                trades += 1
+                _persist_grid()
+                _ilog(inst_id, name, f"Startbestand aufgebaut: {seed_qty:.6f} ueber {len(seed_lvls)} Levels @ {cur_price:.2f}", "TRADE")
+            else:
+                _ilog(inst_id, name, f"Startbestand fehlgeschlagen: {resp.get('msg','')} - handelt zunaechst nur bei fallendem Preis", "WARN")
+
+    _held0 = set(held)
     with plock:
         pstate["grid_instances"][inst_id].update({
-            "status":"RUNNING","balance":start_bal,"start_bal":start_bal,
-            "symbol":sym,"upper":round(upper,2),"lower":round(lower,2),
-            "grid_orders":[{"price":round(l,2),"filled":False,
+            "status":"RUNNING","balance":start_bal,"start_bal":start_bal,"started_at":time.time(),
+            "symbol":sym,"upper":round(upper,2),"lower":round(lower,2),"step":round(step,2),
+            "grid_orders":[{"price":round(l,2),"filled":(i in _held0),
                             "side":"BUY" if l<=(upper+lower)/2 else "SELL"}
-                           for l in levels],
+                           for i,l in enumerate(levels)],
         })
-    _ilog(inst_id, name, f"Grid aktiv: {sym} | {n} Levels | {lower:.2f}-{upper:.2f}")
+    _ilog(inst_id, name, f"Grid aktiv: {sym} | {n} Levels | {lower:.2f}-{upper:.2f} | Stufe {step:.2f}")
 
     while not flag["stop"]:
         try:
             px = client.price(sym)
             if px <= 0: time.sleep(check); continue
+
+            # Notausstieg (opt-in) wie run_grid.
+            if sl_pct > 0 and net_qty > 0 and px <= lower * (1 - sl_pct):
+                qcl = fmt_q(sym, net_qty)
+                resp = client.place_futures_order(sym, "sell", qcl, close=True)
+                ok = resp.get("code") == "00000"
+                _ilog(inst_id, name, f"STOP-LOSS: Preis {px:.2f} unter {lower*(1-sl_pct):.2f} -> "
+                                     f"Bestand {'geschlossen' if ok else 'schliessen FEHLGESCHLAGEN: '+resp.get('msg','')}, Grid stoppt", "ERROR")
+                if ok:
+                    net_qty = 0.0; held = []; _persist_grid()
+                break
 
             if current_idx > 0 and px <= levels[current_idx - 1]:
                 current_idx -= 1
@@ -2401,7 +2568,7 @@ def run_grid_instance(flag, inst_cfg, inst_id):
         time.sleep(check)
 
     with plock:
-        pstate["grid_instances"].get(inst_id,{}).update({"status":"STOPPED"})
+        pstate["grid_instances"].get(inst_id,{}).update({"status":"STOPPED","started_at":0})
     _ilog(inst_id, name, "Gestoppt.")
 
 def start_grid_instance(inst_id):
@@ -2459,7 +2626,7 @@ def run_dca(flag):
 
     with plock:
         pstate["bots"]["dca"].update({
-            "status":"RUNNING","balance":start_bal,"start_bal":start_bal,
+            "status":"RUNNING","balance":start_bal,"start_bal":start_bal,"started_at":time.time(),
             "next_buy":"Sofort beim naechsten Zyklus",
         })
     blog("dca",f"Aktiv | SPOT | {sym} | {amount} USDT alle {interval/3600:.0f}h | Spot-Balance: {start_bal:.2f} USDT")
@@ -2515,7 +2682,9 @@ def run_dca(flag):
             blog("dca",f"Loop: {e}","ERROR")
         time.sleep(check)
 
-    with plock: pstate["bots"]["dca"]["status"] = "STOPPED"
+    with plock:
+        pstate["bots"]["dca"]["status"] = "STOPPED"
+        pstate["bots"]["dca"]["started_at"] = 0
     blog("dca","Gestoppt.")
 
 # ─────────────────────────────────────────────
@@ -2889,6 +3058,20 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
 .ov-bot-name{font-weight:600;font-size:12px}
 .ov-status{font-size:10px;padding:2px 8px;border-radius:3px;
             display:inline-block;font-weight:600;letter-spacing:.05em}
+.ov-uptime{display:block;font-size:9px;color:var(--muted);margin-top:3px;letter-spacing:.03em}
+.cfg-summary{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:14px}
+.cfg-sum-head{display:flex;justify-content:space-between;align-items:center;font-size:11px;font-weight:700;
+              letter-spacing:.08em;color:var(--muted);margin-bottom:10px;text-transform:uppercase}
+.cfg-sum-edit{background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;
+              font-size:10px;padding:3px 10px;border-radius:4px;cursor:pointer;text-transform:none;letter-spacing:0}
+.cfg-sum-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px 14px}
+.cfg-sum-item{display:flex;flex-direction:column;gap:2px}
+.cfg-sum-k{font-size:9px;color:var(--muted);letter-spacing:.04em;text-transform:uppercase}
+.cfg-sum-v{font-size:12px;color:var(--text);font-weight:600}
+.cfg-sum-filters{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.cfg-chip{font-size:10px;padding:3px 9px;border-radius:12px;border:1px solid var(--border)}
+.cfg-chip.on{color:var(--signal);background:rgba(0,214,143,.10);border-color:rgba(0,214,143,.3)}
+.cfg-chip.off{color:var(--dim);background:transparent}
 .s-running{color:var(--signal);background:rgba(0,214,143,.1)}
 .s-stopped{color:var(--muted);background:var(--dim)}
 .s-starting{color:var(--dca);background:rgba(251,191,36,.1)}
@@ -3006,9 +3189,11 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <button class="tab" data-tab="derivate" onclick="switchTab('derivate')">DERIVATE</button>
   <button class="tab" data-tab="alerts" onclick="switchTab('alerts')">ALERTS</button>
   <button class="tab" data-tab="settings" onclick="switchTab('settings')">SETTINGS</button>
+  <button class="tab" data-tab="syslog" onclick="switchTab('syslog')">SYSTEM-LOG</button>
   <button id="lang-btn" onclick="toggleLang()" style="margin-left:auto;background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer;white-space:nowrap">DE / EN</button>
   <div style="flex:1"></div>
-  <span class="mode-badge mode-demo" id="mode-badge">DEMO</span>
+  <span id="platform-uptime" style="font-size:10px;color:var(--muted);margin-left:12px" title="Plattform-Laufzeit"></span>
+  <span class="mode-badge mode-demo" id="mode-badge" style="margin-left:12px">DEMO</span>
   <span style="font-size:10px;color:var(--muted);margin-left:12px" id="last-update">--:--:--</span>
 </nav>
 
@@ -3141,6 +3326,14 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
       <div class="card-sub" id="s-streak-info" data-i18n="cur_streak">aktuell</div>
     </div>
   </div>
+  <div class="cfg-summary" id="s-settings">
+    <div class="cfg-sum-head">
+      <span data-i18n="cfg_configured">Aktuelle Konfiguration</span>
+      <button onclick="switchTab('settings')" class="cfg-sum-edit" data-i18n="cfg_edit">bearbeiten</button>
+    </div>
+    <div class="cfg-sum-grid" id="s-settings-grid"></div>
+    <div class="cfg-sum-filters" id="s-settings-filters"></div>
+  </div>
   <div class="pnl-card">
     <div class="pnl-card-label">
       <span data-i18n="pnl_history">PnL-Verlauf</span>
@@ -3217,6 +3410,8 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
           <input type="number" id="ng-n" value="10" min="2" max="50" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%"></div>
         <div><div class="card-label" style="margin-bottom:4px">Budget (USDT)</div>
           <input type="number" id="ng-inv" value="100" min="10" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%"></div>
+        <div><div class="card-label" style="margin-bottom:4px">Stufengroesse (USDT, 0 = auto)</div>
+          <input type="number" id="ng-step" value="0" min="0" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%"></div>
         <div><div class="card-label" style="margin-bottom:4px">API Key</div>
           <input type="text" id="ng-key" placeholder="Bitget API Key" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:7px 10px;border-radius:5px;width:100%"></div>
         <div><div class="card-label" style="margin-bottom:4px">API Secret</div>
@@ -3645,9 +3840,11 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
       <div id="s-signal" class="settings-body">
         <div class="preset-wrap" style="margin-bottom:12px">
           <span style="font-size:10px;color:var(--muted);margin-right:6px" data-i18n="set_preset">Preset:</span>
-          <button class="preset-btn low"    onclick="applyBotPreset('signal','low')" data-i18n="bp_cons">KONSERVATIV</button>
-          <button class="preset-btn med"    onclick="applyBotPreset('signal','medium')" data-i18n="bp_std">STANDARD</button>
-          <button class="preset-btn degen"  onclick="applyBotPreset('signal','high')" data-i18n="bp_agg">AGGRESSIV</button>
+          <button class="preset-btn low"    onclick="applyBotPreset('signal','passiv')" data-i18n="bp_passiv">PASSIV</button>
+          <button class="preset-btn low"    onclick="applyBotPreset('signal','defensiv')" data-i18n="bp_defensiv">DEFENSIV</button>
+          <button class="preset-btn med"    onclick="applyBotPreset('signal','standard')" data-i18n="bp_std">STANDARD</button>
+          <button class="preset-btn degen"  onclick="applyBotPreset('signal','offensiv')" data-i18n="bp_offensiv">OFFENSIV</button>
+          <button class="preset-btn degen"  onclick="applyBotPreset('signal','aggressiv')" data-i18n="bp_agg">AGGRESSIV</button>
         </div>
         <div class="field-row"><label>API Key</label><input type="text" id="sig-key" placeholder="Bitget API Key"></div>
         <div class="field-row"><label>API Secret</label><input type="password" id="sig-sec" placeholder="Bitget API Secret"></div>
@@ -3684,7 +3881,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label data-i18n="lbl_trend">Trendfilter (lange EMA)</label><input type="checkbox" id="sig-f-trend" style="width:auto"></div>
         <div class="field-row"><label data-i18n="lbl_trend_len">Trend-EMA Laenge (20-200)</label><input type="number" id="sig-trend-len" placeholder="50" min="20" max="200"></div>
         <div class="settings-note" data-i18n="note_trend">Trendfilter (MT5-Stil): zusaetzlicher Faktor +1/-1, je nachdem ob der Preis ueber/unter einer langen EMA liegt. Standardmaessig AUS. Macht Signale selektiver (handelt eher mit dem uebergeordneten Trend).</div>
-        <div class="field-row"><label data-i18n="lbl_sig_thresh">Signal-Schwelle (2-5)</label><input type="number" id="sig-thresh" placeholder="3" min="2" max="5"></div>
+        <div class="field-row"><label data-i18n="lbl_sig_thresh">Signal-Schwelle (1-5)</label><input type="number" id="sig-thresh" placeholder="3" min="1" max="5"></div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('signal')">Verbindung testen</button>
           <span class="val-result" id="val-signal"></span>
@@ -3703,9 +3900,11 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         </div>
         <div class="preset-wrap" style="margin-bottom:12px">
           <span style="font-size:10px;color:var(--muted);margin-right:6px" data-i18n="set_preset">Preset:</span>
-          <button class="preset-btn low"   onclick="applyBotPreset('grid','low')" data-i18n="bp_cons">KONSERVATIV</button>
-          <button class="preset-btn med"   onclick="applyBotPreset('grid','medium')" data-i18n="bp_std">STANDARD</button>
-          <button class="preset-btn degen" onclick="applyBotPreset('grid','high')" data-i18n="bp_agg">AGGRESSIV</button>
+          <button class="preset-btn low"   onclick="applyBotPreset('grid','passiv')" data-i18n="bp_passiv">PASSIV</button>
+          <button class="preset-btn low"   onclick="applyBotPreset('grid','defensiv')" data-i18n="bp_defensiv">DEFENSIV</button>
+          <button class="preset-btn med"   onclick="applyBotPreset('grid','standard')" data-i18n="bp_std">STANDARD</button>
+          <button class="preset-btn degen" onclick="applyBotPreset('grid','offensiv')" data-i18n="bp_offensiv">OFFENSIV</button>
+          <button class="preset-btn degen" onclick="applyBotPreset('grid','aggressiv')" data-i18n="bp_agg">AGGRESSIV</button>
         </div>
         <div class="field-row"><label>API Key</label><input type="text" id="grd-key" placeholder="Bitget API Key"></div>
         <div class="field-row"><label>API Secret</label><input type="password" id="grd-sec" placeholder="Bitget API Secret"></div>
@@ -3728,8 +3927,15 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         </div>
         <div class="field-row"><label data-i18n="lbl_price_up">Preis oben (0 = auto)</label><input type="number" id="grd-upper" placeholder="0" min="0"></div>
         <div class="field-row"><label data-i18n="lbl_price_low">Preis unten (0 = auto)</label><input type="number" id="grd-lower" placeholder="0" min="0"></div>
+        <div class="field-row"><label data-i18n="lbl_step">Stufengroesse (USDT, 0 = aus)</label><input type="number" id="grd-step" placeholder="0" min="0" step="1"></div>
+        <div style="font-size:10px;color:var(--muted);margin:-4px 0 8px 0" data-i18n="hint_step">Wenn > 0 und Preis oben/unten = 0: Range wird automatisch so gesetzt, dass jede Stufe so gross ist (z.B. 100 = 100-USDT-Schritte um den aktuellen Preis).</div>
+        <div class="field-row"><label data-i18n="lbl_smart_hours">Smart-Range Rueckblick (h)</label><input type="number" id="grd-srhours" placeholder="24" min="6" max="168"></div>
+        <div style="font-size:10px;color:var(--muted);margin:-4px 0 8px 0" data-i18n="hint_smart">Wenn Preis oben/unten = 0 UND Stufengroesse = 0: Der Grid legt die Range beim Start aus dem echten Hoch/Tief der letzten N Stunden fest (statt stumpf +-5%).</div>
         <div class="field-row"><label data-i18n="lbl_levels">Anzahl Levels</label><input type="number" id="grd-n" placeholder="10" min="2" max="50"></div>
         <div class="field-row"><label>Budget (USDT)</label><input type="number" id="grd-inv" placeholder="100" min="10"></div>
+        <div class="field-row"><label data-i18n="lbl_grd_lev">Hebel (0 = Konto-Hebel lassen)</label><input type="number" id="grd-lev" placeholder="0" min="0" max="125"></div>
+        <div class="field-row"><label data-i18n="lbl_grd_sl">Stop-Loss % unter Untergrenze (0 = aus)</label><input type="number" id="grd-sl" placeholder="0" min="0" max="90" step="0.5"></div>
+        <div style="font-size:10px;color:var(--muted);margin:-4px 0 8px 0" data-i18n="hint_grd_sl">Sicherheitsnetz: Faellt der Preis diese % unter die Untergrenze, schliesst der Grid den Bestand und stoppt (statt ins Bodenlose zu halten). Fuer LIVE empfohlen.</div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('grid')">Verbindung testen</button>
           <span class="val-result" id="val-grid"></span>
@@ -3743,9 +3949,11 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
       <div id="s-dca" class="settings-body">
         <div class="preset-wrap" style="margin-bottom:12px">
           <span style="font-size:10px;color:var(--muted);margin-right:6px" data-i18n="set_preset">Preset:</span>
-          <button class="preset-btn low"   onclick="applyBotPreset('dca','low')" data-i18n="bp_cons">KONSERVATIV</button>
-          <button class="preset-btn med"   onclick="applyBotPreset('dca','medium')" data-i18n="bp_std">STANDARD</button>
-          <button class="preset-btn degen" onclick="applyBotPreset('dca','high')" data-i18n="bp_agg">AGGRESSIV</button>
+          <button class="preset-btn low"   onclick="applyBotPreset('dca','passiv')" data-i18n="bp_passiv">PASSIV</button>
+          <button class="preset-btn low"   onclick="applyBotPreset('dca','defensiv')" data-i18n="bp_defensiv">DEFENSIV</button>
+          <button class="preset-btn med"   onclick="applyBotPreset('dca','standard')" data-i18n="bp_std">STANDARD</button>
+          <button class="preset-btn degen" onclick="applyBotPreset('dca','offensiv')" data-i18n="bp_offensiv">OFFENSIV</button>
+          <button class="preset-btn degen" onclick="applyBotPreset('dca','aggressiv')" data-i18n="bp_agg">AGGRESSIV</button>
         </div>
         <div style="background:rgba(0,214,143,.06);border:1px solid rgba(0,214,143,.15);border-radius:5px;padding:8px 12px;margin-bottom:12px;font-size:10px;color:var(--signal)" data-i18n="dca_spot_note">
           DCA kauft immer auf dem Spot-Markt (kein Hebel, keine Funding-Kosten). Das Guthaben muss auf dem Spot-Konto des Sub-Accounts liegen.
@@ -3788,6 +3996,29 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   </div>
 </div>
 
+<!-- SYSTEM-LOG -->
+<div id="panel-syslog" class="panel">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:10px">
+    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="slog_title">SYSTEM-LOG (platform.log)</span>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <label style="font-size:10px;color:var(--muted);display:flex;align-items:center;gap:5px;cursor:pointer">
+        <input type="checkbox" id="slog-auto" style="width:auto" onchange="toggleSyslogAuto()"><span data-i18n="slog_auto">Auto-Refresh (5s)</span></label>
+      <select id="slog-lines" onchange="loadSyslog()" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:10px;padding:4px 8px;border-radius:4px">
+        <option value="200">200</option><option value="400" selected>400</option><option value="1000">1000</option><option value="3000">3000</option>
+      </select>
+      <button onclick="loadSyslog()" style="background:var(--dim);border:1px solid var(--border);color:var(--muted);font-family:inherit;font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer" data-i18n="slog_refresh">Aktualisieren</button>
+      <a href="/api/syslog/download" download style="background:var(--signal);color:#04140d;font-family:inherit;font-size:10px;font-weight:700;padding:5px 12px;border-radius:4px;cursor:pointer;text-decoration:none" data-i18n="slog_download">Herunterladen</a>
+    </div>
+  </div>
+  <div style="font-size:10px;color:var(--muted);margin-bottom:10px" data-i18n="slog_hint">Vollstaendiges Log der Plattform auf dem Pi. Zum Teilen unten herunterladen.</div>
+  <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--dim);margin-bottom:4px">
+    <span id="slog-meta"></span><span id="slog-updated"></span>
+  </div>
+  <pre id="slog-body" style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px;margin:0;
+       font-family:'SF Mono',Consolas,monospace;font-size:11px;line-height:1.55;color:var(--text);
+       max-height:62vh;overflow:auto;white-space:pre;word-break:normal"><span style="color:var(--muted)" data-i18n="slog_empty">Log wird geladen...</span></pre>
+</div>
+
 <!-- HELP MODAL -->
 <div class="modal-overlay" id="help-modal" onclick="if(event.target===this)closeHelp()">
   <div class="modal">
@@ -3823,6 +4054,23 @@ const STRINGS = {
     nav_dca:'DCA', nav_markt:'MARKT',
     nav_trades:'TRADES',
     nav_backtest:'BACKTEST', nav_correlation:'KORRELATION', nav_derivate:'DERIVATE', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
+    nav_syslog:'SYSTEM-LOG',
+    // Signal-Konfig-Uebersicht
+    cfg_configured:'Aktuelle Konfiguration', cfg_edit:'bearbeiten',
+    cfg_tokens:'Coins', cfg_leverage:'Hebel', cfg_budget:'Budget', cfg_stake:'Einsatz/Trade',
+    cfg_sltp:'SL / TP', cfg_maxconc:'Max. gleichzeitig', cfg_threshold:'Signal-Schwelle',
+    cfg_interval:'Pruef-Intervall', cfg_full_bal:'volle Balance', cfg_fixed:'fix', cfg_score_factors:'Score-Faktoren',
+    lbl_step:'Stufengroesse (USDT, 0 = aus)',
+    hint_step:'Wenn > 0 und Preis oben/unten = 0: Range wird automatisch so gesetzt, dass jede Stufe so gross ist (z.B. 100 = 100-USDT-Schritte um den aktuellen Preis).',
+    lbl_smart_hours:'Smart-Range Rueckblick (h)',
+    hint_smart:'Wenn Preis oben/unten = 0 UND Stufengroesse = 0: Der Grid legt die Range beim Start aus dem echten Hoch/Tief der letzten N Stunden fest (statt stumpf +-5%).',
+    lbl_grd_lev:'Hebel (0 = Konto-Hebel lassen)',
+    lbl_grd_sl:'Stop-Loss % unter Untergrenze (0 = aus)',
+    hint_grd_sl:'Sicherheitsnetz: Faellt der Preis diese % unter die Untergrenze, schliesst der Grid den Bestand und stoppt (statt ins Bodenlose zu halten). Fuer LIVE empfohlen.',
+    // System-Log
+    slog_title:'SYSTEM-LOG (platform.log)', slog_refresh:'Aktualisieren', slog_download:'Herunterladen',
+    slog_auto:'Auto-Refresh (5s)', slog_lines:'Zeilen', slog_hint:'Vollstaendiges Log der Plattform auf dem Pi (aktuelle Datei + rotierte Vorgaenger-Datei). Zum Teilen unten herunterladen.',
+    slog_empty:'Log wird geladen...',
     // Korrelation
     corr_title:'KORRELATIONS-MATRIX', corr_period:'Zeitraum', corr_refresh:'Aktualisieren',
     corr_legend:'Legende:',
@@ -3919,6 +4167,7 @@ const STRINGS = {
     ph_tg_chat:'Deine Chat-ID (z.B. 123456789)',
     set_notify_note:'Telegram: @BotFather → /newbot → Token. Chat-ID von @userinfobot.<br>Discord: Server-Einstellungen → Integrationen → Webhooks → URL kopieren.<br>Beide koennen gleichzeitig aktiv sein. News-Sentiment: CoinGecko (kostenlos, kein Key).',
     set_preset:'Preset:', bp_cons:'KONSERVATIV', bp_std:'STANDARD', bp_agg:'AGGRESSIV',
+    bp_passiv:'PASSIV', bp_defensiv:'DEFENSIV', bp_offensiv:'OFFENSIV',
     preset_low:'🟢 GERINGES RISIKO', preset_med:'🔵 MITTLERES RISIKO', preset_high:'🔴 HOHES RISIKO',
     preset_desc_low:'GERINGES RISIKO: Hebel 1x, enger SL 0.5%, nur starke Signale (Schwelle 4), kleines Grid.',
     preset_desc_medium:'MITTLERES RISIKO: Standard-Werte. Hebel 3x, SL 1%, Schwelle 3, Grid 10 Levels.',
@@ -3935,7 +4184,7 @@ const STRINGS = {
     note_factors:'Score-Faktoren: schalte einzelne Indikatoren an/aus. Alle bestehenden sind standardmaessig an. Die Beitraege jedes Faktors siehst du live im SIGNAL-Tab pro Coin.',
     lbl_trend:'Trendfilter (lange EMA)', lbl_trend_len:'Trend-EMA Laenge (20-200)',
     note_trend:'Trendfilter (MT5-Stil): zusaetzlicher Faktor +1/-1, je nachdem ob der Preis ueber/unter einer langen EMA liegt. Standardmaessig AUS. Macht Signale selektiver (handelt eher mit dem uebergeordneten Trend).',
-    lbl_sig_thresh:'Signal-Schwelle (2-5)',
+    lbl_sig_thresh:'Signal-Schwelle (1-5)',
     grid_oneway_warn:'<b>WICHTIG:</b> Bitget Sub-Account muss auf <b>One-Way Mode</b> stehen!<br>Bitget App: Futures-Handel -> Einstellungen -> Positionsmodus -> One-Way Mode.<br>Im Hedge-Modus oeffnet der Grid Bot ungewollt gegenlaeutige Positionen.',
     lbl_price_up:'Preis oben (0 = auto)', lbl_price_low:'Preis unten (0 = auto)', lbl_levels:'Anzahl Levels',
     lbl_min_funding:'Min. Funding Rate (%)', lbl_max_pos:'Max. Position (USDT)',
@@ -3967,6 +4216,21 @@ const STRINGS = {
     nav_dca:'DCA', nav_markt:'MARKET',
     nav_trades:'TRADES',
     nav_backtest:'BACKTEST', nav_correlation:'CORRELATION', nav_derivate:'DERIVATIVES', nav_alerts:'ALERTS', nav_settings:'SETTINGS',
+    nav_syslog:'SYSTEM LOG',
+    cfg_configured:'Current configuration', cfg_edit:'edit',
+    cfg_tokens:'Coins', cfg_leverage:'Leverage', cfg_budget:'Budget', cfg_stake:'Stake/trade',
+    cfg_sltp:'SL / TP', cfg_maxconc:'Max concurrent', cfg_threshold:'Signal threshold',
+    cfg_interval:'Check interval', cfg_full_bal:'full balance', cfg_fixed:'fixed', cfg_score_factors:'Score factors',
+    lbl_step:'Step size (USDT, 0 = off)',
+    hint_step:'If > 0 and upper/lower price = 0: the range is set automatically so each step is this size (e.g. 100 = 100-USDT steps around the current price).',
+    lbl_smart_hours:'Smart-Range lookback (h)',
+    hint_smart:'If upper/lower price = 0 AND step size = 0: the grid sets its range at start from the real high/low of the last N hours (instead of a blunt +-5%).',
+    lbl_grd_lev:'Leverage (0 = keep account leverage)',
+    lbl_grd_sl:'Stop-loss % below lower bound (0 = off)',
+    hint_grd_sl:'Safety net: if price falls this % below the lower bound, the grid closes its inventory and stops (instead of holding into a crash). Recommended for LIVE.',
+    slog_title:'SYSTEM LOG (platform.log)', slog_refresh:'Refresh', slog_download:'Download',
+    slog_auto:'Auto-refresh (5s)', slog_lines:'lines', slog_hint:'Full platform log on the Pi (current file + rotated previous file). Download below to share.',
+    slog_empty:'Loading log...',
     corr_title:'CORRELATION MATRIX', corr_period:'Period', corr_refresh:'Refresh',
     corr_legend:'Legend:',
     corr_hint:'Correlation of daily returns across your Signal Bot coins. High positive values (red) = coins move together → simultaneous positions increase your risk. Low/negative values (green) = better diversification.',
@@ -4054,6 +4318,7 @@ const STRINGS = {
     ph_tg_chat:'Your chat ID (e.g. 123456789)',
     set_notify_note:'Telegram: @BotFather → /newbot → token. Chat ID from @userinfobot.<br>Discord: Server settings → Integrations → Webhooks → copy URL.<br>Both can be active at once. News sentiment: CoinGecko (free, no key).',
     set_preset:'Preset:', bp_cons:'CONSERVATIVE', bp_std:'STANDARD', bp_agg:'AGGRESSIVE',
+    bp_passiv:'PASSIVE', bp_defensiv:'DEFENSIVE', bp_offensiv:'OFFENSIVE',
     preset_low:'🟢 LOW RISK', preset_med:'🔵 MEDIUM RISK', preset_high:'🔴 HIGH RISK',
     preset_desc_low:'LOW RISK: 1x leverage, tight 0.5% SL, only strong signals (threshold 4), small grid.',
     preset_desc_medium:'MEDIUM RISK: standard values. 3x leverage, 1% SL, threshold 3, 10-level grid.',
@@ -4070,7 +4335,7 @@ const STRINGS = {
     note_factors:'Score factors: turn individual indicators on/off. All existing ones are on by default. You can see each factor\'s contribution live per coin in the SIGNAL tab.',
     lbl_trend:'Trend filter (long EMA)', lbl_trend_len:'Trend EMA length (20-200)',
     note_trend:'Trend filter (MT5 style): extra +1/-1 factor depending on whether price is above/below a long EMA. Off by default. Makes signals more selective (trades more with the higher-timeframe trend).',
-    lbl_sig_thresh:'Signal threshold (2-5)',
+    lbl_sig_thresh:'Signal threshold (1-5)',
     grid_oneway_warn:'<b>IMPORTANT:</b> the Bitget sub-account must be set to <b>One-Way Mode</b>!<br>Bitget app: Futures trading -> Settings -> Position mode -> One-Way Mode.<br>In Hedge mode the Grid Bot unintentionally opens opposing positions.',
     lbl_price_up:'Upper price (0 = auto)', lbl_price_low:'Lower price (0 = auto)', lbl_levels:'Number of levels',
     lbl_min_funding:'Min funding rate (%)', lbl_max_pos:'Max position (USDT)',
@@ -4235,6 +4500,7 @@ function applyLang() {
     dca:'nav_dca', markt:'nav_markt',
     trades:'nav_trades',
     backtest:'nav_backtest', correlation:'nav_correlation', derivate:'nav_derivate', alerts:'nav_alerts', settings:'nav_settings',
+    syslog:'nav_syslog',
   };
   document.querySelectorAll('.tab[data-tab]').forEach(btn => {
     const k = tabMap[btn.dataset.tab];
@@ -5017,6 +5283,7 @@ async function addGridInstance() {
     symbol:      get('ng-sym')||'BTCUSDT',
     grid_count:  parseInt(get('ng-n'))||10,
     investment:  parseFloat(get('ng-inv'))||100,
+    step_size:   parseFloat(get('ng-step'))||0,
     api_key:     get('ng-key'),
     api_secret:  get('ng-sec'),
     passphrase:  get('ng-pass'),
@@ -5562,31 +5829,41 @@ async function loadPositions() {
 }
 
 // -- PER-BOT PRESETS ------------------------------------------
+// 5 Stufen: passiv -> defensiv -> standard -> offensiv -> aggressiv.
+// Aggressiver = mehr Trades: Signal niedrigere Schwelle, Grid mehr Levels (=kleinere Schritte),
+// DCA kuerzeres Intervall. Nur Formular-Vorbelegung - du kannst danach alles feinjustieren.
 const BOT_PRESETS={
   signal:{
-    low:{lever:1,usdt:20,thresh:4},
-    medium:{lever:3,usdt:30,thresh:3},
-    high:{lever:5,usdt:50,thresh:2},
+    passiv:   {lever:1, usdt:15, thresh:5, trend:false},
+    defensiv: {lever:2, usdt:20, thresh:4, trend:false},
+    standard: {lever:3, usdt:30, thresh:3, trend:false},
+    offensiv: {lever:5, usdt:40, thresh:2, trend:true},
+    aggressiv:{lever:8, usdt:60, thresh:1, trend:true},
   },
   grid:{
-    low:{n:6,inv:50},
-    medium:{n:10,inv:100},
-    high:{n:20,inv:300},
+    passiv:   {n:6,  inv:50},
+    defensiv: {n:8,  inv:80},
+    standard: {n:12, inv:100},
+    offensiv: {n:20, inv:200},
+    aggressiv:{n:30, inv:300},
   },
   dca:{
-    low:{hrs:168,amt:20},
-    medium:{hrs:24,amt:30},
-    high:{hrs:12,amt:50},
+    passiv:   {hrs:336, amt:15},
+    defensiv: {hrs:168, amt:20},
+    standard: {hrs:24,  amt:30},
+    offensiv: {hrs:12,  amt:40},
+    aggressiv:{hrs:6,   amt:60},
   },
 };
 
 function applyBotPreset(botId,level) {
   const p=BOT_PRESETS[botId]?.[level]; if(!p) return;
   const set=(id,v)=>{const el=document.getElementById(id);if(el&&v!==undefined)el.value=v;};
-  if(botId==='signal'){set('sig-lever',p.lever);set('sig-usdt',p.usdt);set('sig-thresh',p.thresh);}
+  if(botId==='signal'){set('sig-lever',p.lever);set('sig-usdt',p.usdt);set('sig-thresh',p.thresh);
+    const tr=document.getElementById('sig-f-trend'); if(tr&&p.trend!==undefined) tr.checked=p.trend;}
   else if(botId==='grid'){set('grd-n',p.n);set('grd-inv',p.inv);}
   else if(botId==='dca'){set('dca-hrs',p.hrs);set('dca-amt',p.amt);}
-  const labels={low:'Konservativ',medium:'Standard',high:'Aggressiv'};
+  const labels={passiv:'Passiv',defensiv:'Defensiv',standard:'Standard',offensiv:'Offensiv',aggressiv:'Aggressiv'};
   const desc=document.getElementById('preset-desc');
   if(desc) desc.textContent=botId.toUpperCase()+' - '+(labels[level]||level)+' geladen.';
 }
@@ -5607,12 +5884,14 @@ function switchTab(id) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   const panel = document.getElementById('panel-' + id);
   if (panel) panel.classList.add('active');
-  document.querySelectorAll('.tab').forEach(t => {
-    if (t.getAttribute('data-bot') === id || t.textContent.toLowerCase().includes(id))
-      t.classList.add('active');
+  document.querySelectorAll('.tab').forEach(tb => {
+    if (tb.dataset.tab === id || tb.getAttribute('data-bot') === id)
+      tb.classList.add('active');
   });
   activePanel = id;
   if (id === 'settings')  fillSettingsForm();  // holt /api/config selbst - unabhaengig von lastState (Fix: nach F5 war das Formular sonst leer)
+  if (id === 'signal')    loadSignalSettings();
+  if (id === 'syslog')    loadSyslog();
   if (id === 'overview')  { loadPositions(); loadFGHistory(); }
   if (id === 'markt')     { loadMarket(); loadKalender(false); }
   if (id === 'alerts')    { loadAlerts(); loadAlertLog(); }
@@ -5654,6 +5933,102 @@ function statusClass(status) {
 }
 
 function pnlColor(v) { return parseFloat(v) >= 0 ? 'green' : 'red'; }
+
+// Laufzeit-Formatierung: started_at (Server-Epoch, Sek.) -> "3d 4h" / "5h 12m" / "8m 03s" / "42s".
+// Nutzt die Server-Uhr (state.server_now), damit eine falsch gehende Client-Uhr nicht stoert.
+let _serverNow = 0, _serverNowAt = 0;   // letzter Server-Zeitstempel + lokale Ankunftszeit
+function fmtUptime(startedAt) {
+  if (!startedAt) return '';
+  const nowSec = (_serverNow ? _serverNow + (Date.now()/1000 - _serverNowAt) : Date.now()/1000);
+  let s = Math.max(0, Math.floor(nowSec - startedAt));
+  const d = Math.floor(s/86400); s -= d*86400;
+  const h = Math.floor(s/3600);  s -= h*3600;
+  const m = Math.floor(s/60);    s -= m*60;
+  const hms = String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+  return d > 0 ? d+'d '+hms : hms;   // z.B. "2d 05:13:42" oder "05:13:42"
+}
+
+// Laufzeit-Anzeigen jede Sekunde aktualisieren (fluessiger Timer, unabhaengig vom Poll-Intervall).
+function tickUptimes() {
+  const pu = document.getElementById('platform-uptime');
+  if (pu) pu.textContent = (lastState && lastState.platform_started_at) ? '⏱ ' + fmtUptime(lastState.platform_started_at) : '';
+  document.querySelectorAll('.ov-uptime[data-start]').forEach(el => {
+    const st = parseFloat(el.dataset.start) || 0;
+    el.textContent = st ? '⏱ ' + fmtUptime(st) : '';
+  });
+}
+setInterval(tickUptimes, 1000);
+
+// Signal-Konfig-Uebersicht: holt /api/config und zeigt kompakt, was eingestellt ist.
+function loadSignalSettings() {
+  fetch('/api/config').then(r=>r.json()).then(cfg => renderSignalSettings(cfg))
+    .catch(e=>console.error('loadSignalSettings:', e));
+}
+function renderSignalSettings(cfg) {
+  const grid = document.getElementById('s-settings-grid');
+  const filt = document.getElementById('s-settings-filters');
+  if (!grid || !filt) return;
+  const s = (cfg.bots && cfg.bots.signal) || {};
+  const toks = (s.tokens || []).map(x=>String(x).replace('USDT','')).join(', ') || '–';
+  const budget = (s.budget_usdt && s.budget_usdt > 0) ? s.budget_usdt+' USDT' : t('cfg_full_bal');
+  const stake  = (s.use_risk_pct !== false)
+      ? (s.risk_pct ?? 3)+'%' : (s.usdt_per_trade ?? 30)+' USDT '+t('cfg_fixed');
+  const sltp   = (s.use_atr_sl !== false)
+      ? 'ATR ×'+(s.atr_sl_mult ?? 1.5)+' / ×'+(s.atr_tp_mult ?? 2.5)
+      : ((s.stop_loss_pct ?? 0.01)*100).toFixed(1)+'% / '+((s.take_profit_pct ?? 0.02)*100).toFixed(1)+'%';
+  const item = (k,v)=>`<div class="cfg-sum-item"><span class="cfg-sum-k">${k}</span><span class="cfg-sum-v">${v}</span></div>`;
+  grid.innerHTML =
+    item(t('cfg_tokens'),   toks) +
+    item(t('cfg_leverage'), (s.leverage ?? 3)+'x') +
+    item(t('cfg_budget'),   budget) +
+    item(t('cfg_stake'),    stake) +
+    item(t('cfg_sltp'),     sltp) +
+    item(t('cfg_maxconc'),  s.max_concurrent ?? 2) +
+    item(t('cfg_threshold'),s.signal_threshold ?? 3) +
+    item(t('cfg_interval'), (s.check_interval ?? 30)+'s');
+  // Score-Faktoren + Filter als Chips (an = gruen, aus = grau)
+  const chips = [
+    ['EMA','use_ema'],['RSI','use_rsi'],['MACD','use_macd'],['BB','use_bb'],
+    ['Volume','use_volume'],['Funding','use_funding'],['Fear&Greed','use_fg'],
+    ['News','use_news'],['Makro','use_macro'],['Trend','use_trend'],
+    ['Korrelation','use_correlation_filter'],['ADX','use_adx_filter'],['Orderbook','use_orderbook_signal'],
+  ];
+  filt.innerHTML = `<span class="cfg-sum-k" style="width:100%;margin-bottom:2px">${t('cfg_score_factors')}</span>` +
+    chips.map(([lbl,key]) => {
+      const on = key === 'use_trend' ? (s[key] === true) : (s[key] !== false);
+      return `<span class="cfg-chip ${on?'on':'off'}">${on?'✓':'○'} ${lbl}</span>`;
+    }).join('');
+}
+
+// System-Log-Viewer: laedt die letzten N Zeilen von /api/syslog, faerbt WARN/ERROR ein.
+let _slogTimer = null;
+function loadSyslog() {
+  const n = document.getElementById('slog-lines')?.value || 400;
+  fetch('/api/syslog?lines='+n).then(r=>r.json()).then(d => {
+    const body = document.getElementById('slog-body');
+    if (!body) return;
+    const lines = d.lines || [];
+    if (!lines.length) { body.innerHTML = '<span style="color:var(--muted)">(leer)</span>'; }
+    else {
+      body.innerHTML = lines.map(l => {
+        const e = esc(l);
+        if (/\bERROR\b/.test(l))              return '<span style="color:var(--red)">'+e+'</span>';
+        if (/\bWARNING\b|\bWARN\b/.test(l))   return '<span style="color:var(--dca)">'+e+'</span>';
+        return e;
+      }).join('\n');
+      body.scrollTop = body.scrollHeight;   // ans Ende (neueste Zeilen) scrollen
+    }
+    const meta = document.getElementById('slog-meta');
+    if (meta) meta.textContent = (d.shown||0)+' / '+(d.count||0)+' '+t('slog_lines')+' · '+Math.round((d.size||0)/1024)+' KB';
+    const upd = document.getElementById('slog-updated');
+    if (upd) upd.textContent = d.now || '';
+  }).catch(e=>{ const b=document.getElementById('slog-body'); if(b) b.textContent='Fehler: '+e; });
+}
+function toggleSyslogAuto() {
+  const on = document.getElementById('slog-auto')?.checked;
+  if (_slogTimer) { clearInterval(_slogTimer); _slogTimer = null; }
+  if (on) { loadSyslog(); _slogTimer = setInterval(()=>{ if (activePanel==='syslog') loadSyslog(); }, 5000); }
+}
 
 function renderLog(entries, maxN=40) {
   if (!entries || !entries.length) return '<span style="color:var(--muted);font-size:11px">Kein Log</span>';
@@ -5719,7 +6094,12 @@ function renderTokenCard(sym, d) {
 
 function update(state) {
   lastState = state;
+  // Server-Uhr merken (fuer fmtUptime) - so bleibt die Laufzeit auch bei schiefer Client-Uhr korrekt.
+  if (state.server_now) { _serverNow = state.server_now; _serverNowAt = Date.now()/1000; }
   document.getElementById('last-update').textContent = new Date().toLocaleTimeString('de-DE');
+  // Plattform-Laufzeit im Header
+  const pu = document.getElementById('platform-uptime');
+  if (pu) pu.textContent = state.platform_started_at ? '⏱ ' + fmtUptime(state.platform_started_at) : '';
   trackPnl(state);
   updateSparklines();
 
@@ -5750,9 +6130,10 @@ function update(state) {
     totalBal    += bal;
     totalPnl    += pnl;
     totalTrades += parseInt(b.trade_count||0);
+    const up = (st === 'RUNNING') ? fmtUptime(b.started_at) : '';
     return `<div class="ov-row">
       <span class="ov-bot-name" style="color:${BOT_COLORS[id]}">${BOT_NAMES[id]}</span>
-      <span><span class="ov-status ${statusClass(st)}">${st}</span></span>
+      <span><span class="ov-status ${statusClass(st)}">${st}</span>${up?`<span class="ov-uptime" data-start="${b.started_at}">⏱ ${up}</span>`:''}</span>
       <span class="blue">${bal.toFixed(2)}</span>
       <span class="${pnlColor(pnl)}">${(pnl>=0?'+':'')+pnl.toFixed(2)}</span>
       <span style="color:var(--muted)">${(b.trade_count||0)+' Trades'}</span>
@@ -5833,7 +6214,7 @@ function update(state) {
   gpnlEl.className = 'card-value ' + pnlColor(gpnl);
   document.getElementById('g-filled').textContent = gg.filled||0;
   document.getElementById('g-symbol').textContent = gg.symbol||'-';
-  document.getElementById('g-range').textContent = gg.lower&&gg.upper ? gg.lower+' - '+gg.upper : '-';
+  document.getElementById('g-range').textContent = gg.lower&&gg.upper ? gg.lower+' - '+gg.upper+(gg.step?' · Δ'+gg.step:'') : '-';
   const orders = gg.grid_orders || [];
   if (orders.length > 0) {
     const midPrice = (gg.upper + gg.lower) / 2;
@@ -5952,6 +6333,10 @@ function fillSettingsForm(state) {
     document.getElementById('grd-sym').value   = s(b.grid?.symbol||'BTCUSDT');
     document.getElementById('grd-upper').value = s(b.grid?.upper_price||0);
     document.getElementById('grd-lower').value = s(b.grid?.lower_price||0);
+    document.getElementById('grd-step').value  = s(b.grid?.step_size||0);
+    document.getElementById('grd-srhours').value = s(b.grid?.smart_range_hours||24);
+    document.getElementById('grd-lev').value   = s(b.grid?.leverage||0);
+    document.getElementById('grd-sl').value    = s(((b.grid?.stop_loss_pct||0)*100));
     document.getElementById('grd-n').value     = s(b.grid?.grid_count||10);
     document.getElementById('grd-inv').value   = s(b.grid?.investment||100);
     document.getElementById('dca-key').value = s(b.dca?.api_key);
@@ -6021,6 +6406,10 @@ async function saveSettings() {
         symbol:      val('grd-sym')   || 'BTCUSDT',
         upper_price: num('grd-upper'),
         lower_price: num('grd-lower'),
+        step_size:   num('grd-step'),
+        smart_range_hours: int('grd-srhours') || 24,
+        leverage:    int('grd-lev'),
+        stop_loss_pct: (num('grd-sl')||0) / 100,
         grid_count:  int('grd-n')     || 10,
         investment:  num('grd-inv')   || 100,
       },
@@ -6224,19 +6613,30 @@ class Handler(BaseHTTPRequestHandler):
             # (gleicher API-Key) - dann darf der Bestand nur EINMAL zaehlen. Pro einzigartigem
             # API-Key eine Balance addieren (Haupt-Bots + Grid-Instanzen).
             try:
-                _cfg = load_config(); _seen = set(); _tot = 0.0
+                _cfg = load_config(); _seen = set(); _tot = 0.0; _all = []
                 for _bid in ("signal", "grid", "dca"):
+                    _b = float(state_copy["bots"][_bid].get("balance", 0) or 0)
+                    if _b: _all.append(_b)
                     _ak = _cfg["bots"].get(_bid, {}).get("api_key", "")
                     if _ak and _ak not in _seen:
-                        _seen.add(_ak); _tot += float(state_copy["bots"][_bid].get("balance", 0) or 0)
+                        _seen.add(_ak); _tot += _b
                 for _inst in _cfg.get("grid_instances", []):
+                    _b = float(state_copy["grid_instances"].get(_inst.get("id"), {}).get("balance", 0) or 0)
+                    if _b: _all.append(_b)
                     _ak = _inst.get("api_key", "")
                     if _ak and _ak not in _seen:
-                        _seen.add(_ak)
-                        _tot += float(state_copy["grid_instances"].get(_inst.get("id"), {}).get("balance", 0) or 0)
-                state_copy["total_balance"] = round(_tot, 2)
+                        _seen.add(_ak); _tot += _b
+                # Demo: alle Bots teilen sich EINE virtuelle Wallet -> nicht summieren, sondern
+                # die (identische) Einzel-Balance zeigen. Live: verschiedene Konten = verschiedene
+                # Toepfe -> deduplizierte Summe (pro API-Key einmal).
+                if not _cfg.get("live_mode", False):
+                    state_copy["total_balance"] = round(max(_all), 2) if _all else 0.0
+                else:
+                    state_copy["total_balance"] = round(_tot, 2)
             except Exception:
                 state_copy["total_balance"] = None
+            state_copy["platform_started_at"] = PLATFORM_START
+            state_copy["server_now"] = time.time()
             self._json(state_copy)
         elif self.path == "/api/config":
             self._json(load_config())
@@ -6257,6 +6657,40 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/alert_log":
             with _alert_lock:
                 self._json(list(_alert_log))
+        elif self.path == "/api/syslog/download":
+            # Komplette aktuelle Logdatei als Download (text/plain). Auth ist oben geprueft.
+            try:
+                with open("platform.log", "rb") as f:
+                    raw = f.read()
+            except Exception as e:
+                raw = f"Log nicht lesbar: {e}".encode()
+            fname = "platform-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".log"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        elif self.path.startswith("/api/syslog"):
+            # Letzte N Zeilen der Plattform-Logdatei (Standard 400, max 3000). Bindet die
+            # rotierte Vorgaenger-Datei (platform.log.1) mit ein, damit ueber einen Neustart
+            # hinweg genug Historie sichtbar ist.
+            qs   = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:    n = max(20, min(3000, int(qs.get("lines", ["400"])[0])))
+            except: n = 400
+            lines, size = [], 0
+            for fn in ("platform.log.1", "platform.log"):   # aelter zuerst, dann aktuell
+                try:
+                    with open(fn, "r", encoding="utf-8", errors="replace") as f:
+                        part = f.read()
+                    size += len(part.encode("utf-8", "replace"))
+                    lines.extend(part.splitlines())
+                except FileNotFoundError:
+                    continue
+                except Exception as e:
+                    lines.append(f"[{fn} nicht lesbar: {e}]")
+            self._json({"lines": lines[-n:], "count": len(lines), "shown": min(n, len(lines)),
+                        "size": size, "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
         elif self.path.startswith("/api/klines"):
             # Klines-Proxy zu Bitget (Dashboard-Auth wird oben in do_GET bereits geprueft)
             qs     = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -6453,8 +6887,13 @@ class Handler(BaseHTTPRequestHandler):
                 "symbol":      str(data.get("symbol","BTCUSDT"))[:20],
                 "upper_price": max(0.0, float(data.get("upper_price",0))),
                 "lower_price": max(0.0, float(data.get("lower_price",0))),
+                "step_size":   max(0.0, float(data.get("step_size",0))),
                 "grid_count":  max(2, min(50, int(data.get("grid_count",10)))),
                 "investment":  max(0.0, float(data.get("investment",100))),
+                "seed_position": True,
+                "smart_range_hours": max(6, min(168, int(data.get("smart_range_hours",24)))),
+                "leverage":    max(0, min(125, int(data.get("leverage",0)))),
+                "stop_loss_pct": max(0.0, min(0.9, float(data.get("stop_loss_pct",0)))),
                 "check_interval": 10,
             }
             inst.append(new)
