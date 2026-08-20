@@ -3783,9 +3783,11 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
           Presets fuellen die Signal- und Grid-Bot-Felder automatisch aus. Danach noch API Keys eintragen.
         </div>
         <div class="preset-wrap">
-          <button class="preset-btn low" onclick="applyPreset('low')" data-i18n="preset_low">🟢 LOW RISK</button>
-          <button class="preset-btn med" onclick="applyPreset('medium')" data-i18n="preset_med">🔵 MEDIUM RISK</button>
-          <button class="preset-btn degen" onclick="applyPreset('degen')" data-i18n="preset_high">🔴 HIGH RISK</button>
+          <button class="preset-btn low"   onclick="applyPreset('passiv')" data-i18n="bp_passiv">PASSIV</button>
+          <button class="preset-btn low"   onclick="applyPreset('defensiv')" data-i18n="bp_defensiv">DEFENSIV</button>
+          <button class="preset-btn med"   onclick="applyPreset('standard')" data-i18n="bp_std">STANDARD</button>
+          <button class="preset-btn degen" onclick="applyPreset('offensiv')" data-i18n="bp_offensiv">OFFENSIV</button>
+          <button class="preset-btn degen" onclick="applyPreset('aggressiv')" data-i18n="bp_agg">AGGRESSIV</button>
         </div>
         <div id="preset-desc" style="font-size:10px;color:var(--muted);min-height:16px"></div>
       </div>
@@ -4169,9 +4171,11 @@ const STRINGS = {
     set_preset:'Preset:', bp_cons:'KONSERVATIV', bp_std:'STANDARD', bp_agg:'AGGRESSIV',
     bp_passiv:'PASSIV', bp_defensiv:'DEFENSIV', bp_offensiv:'OFFENSIV',
     preset_low:'🟢 GERINGES RISIKO', preset_med:'🔵 MITTLERES RISIKO', preset_high:'🔴 HOHES RISIKO',
-    preset_desc_low:'GERINGES RISIKO: Hebel 1x, enger SL 0.5%, nur starke Signale (Schwelle 4), kleines Grid.',
-    preset_desc_medium:'MITTLERES RISIKO: Standard-Werte. Hebel 3x, SL 1%, Schwelle 3, Grid 10 Levels.',
-    preset_desc_degen:'HOHES RISIKO: Hebel 5x, weiter SL 2%, niedrige Schwelle 2 (mehr Trades, mehr Risiko).',
+    preset_desc_passiv:'PASSIV: Hebel 1x, nur sehr starke Signale (Schwelle 5), kleines Grid. Wenige, vorsichtige Trades.',
+    preset_desc_defensiv:'DEFENSIV: Hebel 2x, Schwelle 4, Grid 8 Levels. Vorsichtig.',
+    preset_desc_standard:'STANDARD: Hebel 3x, Schwelle 3, Grid 12 Levels. Ausgewogen.',
+    preset_desc_offensiv:'OFFENSIV: Hebel 5x, Schwelle 2, Trend-Faktor an, Grid 20 Levels. Mehr Trades.',
+    preset_desc_aggressiv:'AGGRESSIV: Hebel 8x, Schwelle 1, Trend-Faktor an, Grid 30 Levels. Viele Trades, mehr Risiko.',
     lbl_risk_trade:'Risiko pro Trade (%)', lbl_usdt_trade:'USDT pro Trade (fallback)', lbl_budget:'Budget (USDT)',
     lbl_autostart:'Auto-Start nach Neustart',
     lbl_max_conc:'Max. gleichzeitige Pos.', lbl_corr_filter:'Korrelations-Filter', lbl_max_corr:'Max. Korrelation (0.5-1.0)',
@@ -4320,9 +4324,11 @@ const STRINGS = {
     set_preset:'Preset:', bp_cons:'CONSERVATIVE', bp_std:'STANDARD', bp_agg:'AGGRESSIVE',
     bp_passiv:'PASSIVE', bp_defensiv:'DEFENSIVE', bp_offensiv:'OFFENSIVE',
     preset_low:'🟢 LOW RISK', preset_med:'🔵 MEDIUM RISK', preset_high:'🔴 HIGH RISK',
-    preset_desc_low:'LOW RISK: 1x leverage, tight 0.5% SL, only strong signals (threshold 4), small grid.',
-    preset_desc_medium:'MEDIUM RISK: standard values. 3x leverage, 1% SL, threshold 3, 10-level grid.',
-    preset_desc_degen:'HIGH RISK: 5x leverage, wider 2% SL, low threshold 2 (more trades, more risk).',
+    preset_desc_passiv:'PASSIVE: 1x leverage, only very strong signals (threshold 5), small grid. Few, careful trades.',
+    preset_desc_defensiv:'DEFENSIVE: 2x leverage, threshold 4, 8-level grid. Careful.',
+    preset_desc_standard:'STANDARD: 3x leverage, threshold 3, 12-level grid. Balanced.',
+    preset_desc_offensiv:'OFFENSIVE: 5x leverage, threshold 2, trend factor on, 20-level grid. More trades.',
+    preset_desc_aggressiv:'AGGRESSIVE: 8x leverage, threshold 1, trend factor on, 30-level grid. Many trades, more risk.',
     lbl_risk_trade:'Risk per trade (%)', lbl_usdt_trade:'USDT per trade (fallback)', lbl_budget:'Budget (USDT)',
     lbl_autostart:'Auto-start after reboot',
     lbl_max_conc:'Max simultaneous pos.', lbl_corr_filter:'Correlation filter', lbl_max_corr:'Max correlation (0.5-1.0)',
@@ -4620,22 +4626,14 @@ function onLiveModeChange(isLive) {
 }
 
 // -- STRATEGY PRESETS ------------------------------------------
+// Globaler Strategie-Preset (Signal + Grid gleichzeitig). Gleiche 5 Stufen wie die
+// Bot-eigenen Presets (BOT_PRESETS), damit alles konsistent ist.
 const PRESETS = {
-  low: {
-    desc: '[NIEDRIG] LOW RISK: Hebel 1x, enger SL 0.5%, nur starke Signale (Schwelle 4), kleines Grid.',
-    signal: {lever:1, usdt:20, thresh:4, sl:0.005, tp:0.015},
-    grid: {n:6, inv:50, upper:0, lower:0},
-  },
-  medium: {
-    desc: '[MITTEL] MEDIUM RISK: Standard-Werte. Hebel 3x, SL 1%, Schwelle 3, Grid 10 Levels.',
-    signal: {lever:3, usdt:30, thresh:3, sl:0.010, tp:0.020},
-    grid: {n:10, inv:100, upper:0, lower:0},
-  },
-  degen: {
-    desc: '[HOCH] DEGEN: Hebel 5x, weiter SL 2%, niedrige Schwelle 2 (mehr Trades, mehr Risiko).',
-    signal: {lever:5, usdt:50, thresh:2, sl:0.020, tp:0.040},
-    grid: {n:20, inv:300, upper:0, lower:0},
-  },
+  passiv:    {signal:{lever:1, usdt:15, thresh:5, trend:false}, grid:{n:6,  inv:50}},
+  defensiv:  {signal:{lever:2, usdt:20, thresh:4, trend:false}, grid:{n:8,  inv:80}},
+  standard:  {signal:{lever:3, usdt:30, thresh:3, trend:false}, grid:{n:12, inv:100}},
+  offensiv:  {signal:{lever:5, usdt:40, thresh:2, trend:true},  grid:{n:20, inv:200}},
+  aggressiv: {signal:{lever:8, usdt:60, thresh:1, trend:true},  grid:{n:30, inv:300}},
 };
 
 function applyPreset(id) {
@@ -4647,6 +4645,8 @@ function applyPreset(id) {
     document.getElementById('sig-lever').value  = p.signal.lever;
     document.getElementById('sig-usdt').value   = p.signal.usdt;
     document.getElementById('sig-thresh').value = p.signal.thresh;
+    const tr = document.getElementById('sig-f-trend');
+    if (tr && p.signal.trend !== undefined) tr.checked = p.signal.trend;
   }
   // Grid Bot
   if (p.grid) {
