@@ -176,6 +176,7 @@ DEFAULT_CONFIG = {
             "use_volume": True, "use_funding": True, "use_fg": True, "use_news": True,
             "use_macro": True, "use_trend": False, "trend_len": 50,
             "signal_threshold": 3, "check_interval": 30,
+            "daily_loss_limit_pct": 0.0,  # Tages-Verlustlimit in % (0 = aus). >0 = pausiert bis zum naechsten UTC-Tag.
         },
         "grid": {
             "name": "Grid Bot", "enabled": False, "autostart": False,
@@ -1834,6 +1835,8 @@ def run_signal(flag):
     loss_streak  = 0
     realized_pnl = 0.0   # PnL aus abgeschlossenen Trades DIESES Laufs (kontounabhaengig)
     last_unreal  = 0.0   # unrealisierter PnL der offenen Signal-Positionen (vom letzten Zyklus)
+    _day         = datetime.utcnow().strftime("%Y-%m-%d")  # aktueller UTC-Handelstag
+    _day_anchor  = 0.0   # PnL zu Tagesbeginn (fuer das echte Tages-Verlustlimit)
 
     with plock:
         for t in tokens:
@@ -1889,6 +1892,7 @@ def run_signal(flag):
             use_fg=bc.get("use_fg",True);         use_news=bc.get("use_news",True)
             use_macro=bc.get("use_macro",True);   use_trend=bc.get("use_trend",False)
             trend_len=max(20,int(bc.get("trend_len",50)))
+            daily_limit = max(0.0, float(bc.get("daily_loss_limit_pct", 0))) / 100.0  # 0 = aus
             fkey            = _cfg.get("finnhub_key","")
 
             bal = client.balance(retries=3) or start_bal
@@ -1904,12 +1908,20 @@ def run_signal(flag):
                     "pnl_pct":round(pct*100,2),
                     "last_update":datetime.now().strftime("%H:%M:%S"),
                 })
-            if start_bal > 0 and pct <= -0.02:
-                blog("signal","Tageslimit erreicht. Pause 1h.","WARN")
+            # Tages-Verlustlimit (opt-in, Standard aus). Echter Tages-Reset um 00:00 UTC:
+            # neuer Tag -> Anker = aktueller PnL. Reisst der Tagesverlust das Limit, pausiert
+            # der Bot NUR bis zum naechsten UTC-Tag (kein stuendliches Endlos-Pausen mehr).
+            _today = datetime.utcnow().strftime("%Y-%m-%d")
+            if _today != _day:
+                _day = _today; _day_anchor = pnl
+                blog("signal", f"Neuer Handelstag ({_day}) - Tageslimit zurueckgesetzt")
+            daily_pnl = pnl - _day_anchor
+            if daily_limit > 0 and start_bal > 0 and (daily_pnl / start_bal) <= -daily_limit:
+                blog("signal", f"Tages-Verlustlimit {daily_limit*100:.1f}% erreicht "
+                               f"({daily_pnl:.2f} USDT heute). Pause bis morgen (UTC).", "WARN")
                 with plock: pstate["bots"]["signal"]["status"] = "PAUSED"
-                pause_until = time.time() + 3600
-                while time.time() < pause_until and not flag["stop"]:
-                    time.sleep(5)
+                while datetime.utcnow().strftime("%Y-%m-%d") == _day and not flag["stop"]:
+                    time.sleep(30)
                 with plock: pstate["bots"]["signal"]["status"] = "RUNNING"
                 continue
 
@@ -3884,6 +3896,8 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label data-i18n="lbl_trend_len">Trend-EMA Laenge (20-200)</label><input type="number" id="sig-trend-len" placeholder="50" min="20" max="200"></div>
         <div class="settings-note" data-i18n="note_trend">Trendfilter (MT5-Stil): zusaetzlicher Faktor +1/-1, je nachdem ob der Preis ueber/unter einer langen EMA liegt. Standardmaessig AUS. Macht Signale selektiver (handelt eher mit dem uebergeordneten Trend).</div>
         <div class="field-row"><label data-i18n="lbl_sig_thresh">Signal-Schwelle (1-5)</label><input type="number" id="sig-thresh" placeholder="3" min="1" max="5"></div>
+        <div class="field-row"><label data-i18n="lbl_daily_limit">Tages-Verlustlimit % (0 = aus)</label><input type="number" id="sig-daily-limit" placeholder="0" min="0" max="90" step="0.5"></div>
+        <div class="settings-note" data-i18n="hint_daily_limit">Pausiert den Bot bis zum naechsten Tag (UTC), wenn der Tagesverlust diese % erreicht. 0 = aus (Bot laeuft durch). Fuer LIVE z.B. 5-10 empfohlen.</div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('signal')">Verbindung testen</button>
           <span class="val-result" id="val-signal"></span>
@@ -4189,6 +4203,8 @@ const STRINGS = {
     lbl_trend:'Trendfilter (lange EMA)', lbl_trend_len:'Trend-EMA Laenge (20-200)',
     note_trend:'Trendfilter (MT5-Stil): zusaetzlicher Faktor +1/-1, je nachdem ob der Preis ueber/unter einer langen EMA liegt. Standardmaessig AUS. Macht Signale selektiver (handelt eher mit dem uebergeordneten Trend).',
     lbl_sig_thresh:'Signal-Schwelle (1-5)',
+    lbl_daily_limit:'Tages-Verlustlimit % (0 = aus)',
+    hint_daily_limit:'Pausiert den Bot bis zum naechsten Tag (UTC), wenn der Tagesverlust diese % erreicht. 0 = aus (Bot laeuft durch). Fuer LIVE z.B. 5-10 empfohlen.',
     grid_oneway_warn:'<b>WICHTIG:</b> Bitget Sub-Account muss auf <b>One-Way Mode</b> stehen!<br>Bitget App: Futures-Handel -> Einstellungen -> Positionsmodus -> One-Way Mode.<br>Im Hedge-Modus oeffnet der Grid Bot ungewollt gegenlaeutige Positionen.',
     lbl_price_up:'Preis oben (0 = auto)', lbl_price_low:'Preis unten (0 = auto)', lbl_levels:'Anzahl Levels',
     lbl_min_funding:'Min. Funding Rate (%)', lbl_max_pos:'Max. Position (USDT)',
@@ -4342,6 +4358,8 @@ const STRINGS = {
     lbl_trend:'Trend filter (long EMA)', lbl_trend_len:'Trend EMA length (20-200)',
     note_trend:'Trend filter (MT5 style): extra +1/-1 factor depending on whether price is above/below a long EMA. Off by default. Makes signals more selective (trades more with the higher-timeframe trend).',
     lbl_sig_thresh:'Signal threshold (1-5)',
+    lbl_daily_limit:'Daily loss limit % (0 = off)',
+    hint_daily_limit:'Pauses the bot until the next day (UTC) when the daily loss reaches this %. 0 = off (bot keeps trading). For LIVE e.g. 5-10 recommended.',
     grid_oneway_warn:'<b>IMPORTANT:</b> the Bitget sub-account must be set to <b>One-Way Mode</b>!<br>Bitget app: Futures trading -> Settings -> Position mode -> One-Way Mode.<br>In Hedge mode the Grid Bot unintentionally opens opposing positions.',
     lbl_price_up:'Upper price (0 = auto)', lbl_price_low:'Lower price (0 = auto)', lbl_levels:'Number of levels',
     lbl_min_funding:'Min funding rate (%)', lbl_max_pos:'Max position (USDT)',
@@ -6329,6 +6347,7 @@ function fillSettingsForm(state) {
     sf('macro').checked=(sg.use_macro!==false); sf('trend').checked=(sg.use_trend===true);
     document.getElementById('sig-trend-len').value = s(sg.trend_len ?? 50);
     document.getElementById('sig-thresh').value = s(b.signal?.signal_threshold||3);
+    document.getElementById('sig-daily-limit').value = s(b.signal?.daily_loss_limit_pct||0);
     document.getElementById('grd-key').value   = s(b.grid?.api_key);
     document.getElementById('grd-sym').value   = s(b.grid?.symbol||'BTCUSDT');
     document.getElementById('grd-upper').value = s(b.grid?.upper_price||0);
@@ -6397,6 +6416,7 @@ async function saveSettings() {
         use_trend:   document.getElementById('sig-f-trend')?.checked ?? false,
         trend_len:   int('sig-trend-len') || 50,
         signal_threshold: int('sig-thresh')   || 3,
+        daily_loss_limit_pct: num('sig-daily-limit') || 0,
       },
       grid: {
         api_key:     val('grd-key'),
