@@ -6931,11 +6931,16 @@ class Handler(BaseHTTPRequestHandler):
                 bot_id = data.get("bot_id", "")
                 # Im selben Modus testen, in dem die Bots laufen (vorher hart DEMO -> Live-Keys
                 # zeigten faelschlich 0/Fehler).
-                live   = load_config().get("live_mode", False)
+                _cfg   = load_config()
+                live   = _cfg.get("live_mode", False)
+                # Secret/Passphrase (und Key) werden aus Sicherheitsgruenden NICHT ins Formular
+                # zurueckgefuellt. Leere Felder -> gespeicherte Werte nehmen, damit "Verbindung
+                # testen" auch ohne Neu-Eintippen funktioniert (sonst 40012 apikey/password).
+                _saved = _cfg.get("bots", {}).get(bot_id, {}) if bot_id else {}
                 client = BitgetClient(
-                    data.get("api_key",""),
-                    data.get("api_secret",""),
-                    data.get("passphrase",""),
+                    data.get("api_key","")     or _saved.get("api_key",""),
+                    data.get("api_secret","")  or _saved.get("api_secret",""),
+                    data.get("passphrase","")  or _saved.get("passphrase",""),
                     live_mode=live
                 )
                 if bot_id == "dca":
