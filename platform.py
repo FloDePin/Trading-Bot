@@ -8,7 +8,7 @@ import time, json, hmac, hashlib, base64, logging, requests
 import urllib.parse, threading, os, math, sqlite3, sys, secrets, uuid, getpass
 import signal as _signal
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 
 # ─────────────────────────────────────────────
@@ -376,6 +376,8 @@ def grid_save_state(key, data):
 # ─────────────────────────────────────────────
 #  BITGET API CLIENT
 # ─────────────────────────────────────────────
+_ACCT_CACHE = {}  # api_key -> 'uta'/'classic' (global, damit neue Clients nicht neu erkennen+loggen)
+
 class BitgetClient:
     def __init__(self, api_key, api_secret, passphrase, live_mode=False):
         self.key   = api_key
@@ -445,13 +447,18 @@ class BitgetClient:
         """Erkennt (und cacht pro Client) ob dieser Key ein Unified Trading Account ist.
         Strategie: UTA-Assets-Endpunkt probieren - code 00000 => UTA, sonst Classic."""
         if self._acct is None:
-            try:
-                r = self.get("/api/v3/account/assets", {}, retries=1)
-                self._acct = "uta" if str(r.get("code")) == "00000" else "classic"
-            except Exception:
-                self._acct = "classic"
-            log.info(f"Bitget-Kontotyp erkannt: {self._acct.upper()} "
-                     f"({'DEMO' if not self.live else 'LIVE'})")
+            cached = _ACCT_CACHE.get(self.key)
+            if cached:
+                self._acct = cached          # schon fuer diesen Key erkannt -> kein erneutes Loggen
+            else:
+                try:
+                    r = self.get("/api/v3/account/assets", {}, retries=1)
+                    self._acct = "uta" if str(r.get("code")) == "00000" else "classic"
+                except Exception:
+                    self._acct = "classic"
+                _ACCT_CACHE[self.key] = self._acct
+                log.info(f"Bitget-Kontotyp erkannt: {self._acct.upper()} "
+                         f"({'DEMO' if not self.live else 'LIVE'})")
         return self._acct == "uta"
 
     def _uta_assets(self, retries=3):
@@ -902,7 +909,7 @@ def fetch_macro(finnhub_key):
                 _macro_cache["soft_score"], _macro_cache["events"])
     if not finnhub_key: return False, 0, 0, []
     try:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         r   = requests.get(
             f"https://finnhub.io/api/v1/calendar/economic"
             f"?from={now.strftime('%Y-%m-%d')}"
@@ -1697,7 +1704,7 @@ def run_signal(flag):
     loss_streak  = 0
     realized_pnl = 0.0   # PnL aus abgeschlossenen Trades DIESES Laufs (kontounabhaengig)
     last_unreal  = 0.0   # unrealisierter PnL der offenen Signal-Positionen (vom letzten Zyklus)
-    _day         = datetime.utcnow().strftime("%Y-%m-%d")  # aktueller UTC-Handelstag
+    _day         = datetime.now(timezone.utc).strftime("%Y-%m-%d")  # aktueller UTC-Handelstag
     _day_anchor  = 0.0   # PnL zu Tagesbeginn (fuer das echte Tages-Verlustlimit)
     cooldown_until = {}  # sym -> Zeitpunkt, ab dem wieder gehandelt werden darf (Anti-Churn)
     trail          = {}  # sym -> {side, peak, stop} fuer den nachziehenden Trailing-Stop
@@ -1781,7 +1788,7 @@ def run_signal(flag):
             # Tages-Verlustlimit (opt-in, Standard aus). Echter Tages-Reset um 00:00 UTC:
             # neuer Tag -> Anker = aktueller PnL. Reisst der Tagesverlust das Limit, pausiert
             # der Bot NUR bis zum naechsten UTC-Tag (kein stuendliches Endlos-Pausen mehr).
-            _today = datetime.utcnow().strftime("%Y-%m-%d")
+            _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if _today != _day:
                 _day = _today; _day_anchor = pnl
                 blog("signal", f"Neuer Handelstag ({_day}) - Tageslimit zurueckgesetzt")
@@ -1790,7 +1797,7 @@ def run_signal(flag):
                 blog("signal", f"Tages-Verlustlimit {daily_limit*100:.1f}% erreicht "
                                f"({daily_pnl:.2f} USDT heute). Pause bis morgen (UTC).", "WARN")
                 with plock: pstate["bots"]["signal"]["status"] = "PAUSED"
-                while datetime.utcnow().strftime("%Y-%m-%d") == _day and not flag["stop"]:
+                while datetime.now(timezone.utc).strftime("%Y-%m-%d") == _day and not flag["stop"]:
                     time.sleep(30)
                 with plock: pstate["bots"]["signal"]["status"] = "RUNNING"
                 continue
@@ -2002,40 +2009,19 @@ def run_signal(flag):
                             trail[sym] = st
                         _flip = (ps=="LONG" and sig=="SHORT") or (ps=="SHORT" and sig=="LONG")
                         if trail_hit or _flip:
-                            # Position schliessen (Trailing-Stop ODER Gegen-Trend-Signal).
+                            # NUR die Schliessen-Order senden. Verbucht wird AUSSCHLIESSLICH, wenn die
+                            # Position naechsten Zyklus wirklich verschwunden ist (prev_pos-Zweig unten).
+                            # Das ist robust gegen "Order akzeptiert (00000), aber nicht gefuellt"
+                            # (dann bleibt sie offen -> kein Phantom-Verlust) und verhindert Doppelbuchung.
+                            if trail_hit:
+                                trail.pop(sym, None)   # neu ermitteln, falls sie doch offen bleibt
                             resp = client.place_futures_order(
                                 sym, "sell" if pos["holdSide"] == "long" else "buy",
                                 str(pos["total"]), close=True)
-                            if resp.get("code") != "00000":
-                                # Schliessen fehlgeschlagen -> NICHT verbuchen (sonst Phantom-Verlust
-                                # jeden Zyklus, waehrend die Position offen bleibt). Gedrosselt warnen,
-                                # unrealisierten PnL weiter anzeigen; naechster Zyklus versucht es erneut.
-                                if time.time() - close_warn_at.get(sym, 0) > 300:
-                                    close_warn_at[sym] = time.time()
-                                    blog("signal",f"{cur}: Schliessen FEHLGESCHLAGEN ({ps} {pos.get('total')}) - {resp.get('msg','')}","WARN")
-                                cycle_unreal += float(pos.get("unrealizedPL", 0) or 0)
-                            else:
-                                upnl  = float(pos.get("unrealizedPL", 0))
-                                psize = float(pos.get("total", 0))
-                                fee   = (entry + price_now) * psize * fee_rate
-                                net   = upnl - fee
-                                realized_pnl += net
-                                db_save_trade("signal", cur, ps, entry, round(price_now,4),
-                                              round(net,4), fee=round(fee,6), size=psize)
-                                if net > 0: win_streak += 1; loss_streak = 0
-                                else:       loss_streak += 1; win_streak = 0
-                                with plock:
-                                    pstate["bots"]["signal"].update({
-                                        "win_streak":win_streak, "loss_streak":loss_streak})
-                                open_pos_count = max(0, open_pos_count - 1)
-                                open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
-                                if cooldown_min > 0: cooldown_until[sym] = time.time() + cooldown_min*60
-                                trail.pop(sym, None)
-                                if trail_hit:
-                                    blog("signal",f"{cur}: Trailing-Stop @ {price_now:.4f} (Stop {st['stop']:.4f}) -> geschlossen | PnL {net:+.2f}","TRADE")
-                                else:
-                                    blog("signal",f"{cur}: Position gedreht","TRADE")
-                                    if not blackout: _open(sig)
+                            if resp.get("code") != "00000" and (time.time() - close_warn_at.get(sym, 0) > 300):
+                                close_warn_at[sym] = time.time()
+                                blog("signal",f"{cur}: Schliessen abgelehnt ({ps} {pos.get('total')}) - {resp.get('msg','')}","WARN")
+                            cycle_unreal += float(pos.get("unrealizedPL", 0) or 0)
                         else:
                             # Position bleibt offen -> unrealisierten PnL fuer die Anzeige mitzaehlen
                             cycle_unreal += float(pos.get("unrealizedPL", 0) or 0)
@@ -2065,7 +2051,8 @@ def run_signal(flag):
                             open_pos_count = max(0, open_pos_count - 1)
                             open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
                             if cooldown_min > 0: cooldown_until[sym] = time.time() + cooldown_min*60
-                            trail.pop(sym, None)   # Position extern geschlossen -> Trail verwerfen
+                            trail.pop(sym, None)   # Position weg -> Trail verwerfen
+                            blog("signal", f"{cur}: {ps} geschlossen | PnL {net:+.2f}", "TRADE")
                         if sig in ("LONG","SHORT") and not blackout:
                             _open(sig)
                     with plock:
