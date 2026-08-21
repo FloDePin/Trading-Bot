@@ -174,7 +174,7 @@ DEFAULT_CONFIG = {
             "use_sltp_guard": True,
             "use_ema": True, "use_rsi": True, "use_macd": True, "use_bb": True,
             "use_volume": True, "use_funding": True, "use_fg": True, "use_news": True,
-            "use_macro": True, "use_trend": False, "trend_len": 50,
+            "use_macro": True, "use_trend": False, "trend_len": 50, "use_delta": True,
             "signal_threshold": 3, "check_interval": 30,
             "daily_loss_limit_pct": 0.0,  # Tages-Verlustlimit in % (0 = aus). >0 = pausiert bis zum naechsten UTC-Tag.
             "use_trend_gate": True,       # harter Trend-Filter: ueber EMA nur Long, darunter nur Short
@@ -782,6 +782,21 @@ def vol_ratio(volumes, period=20):
     avg = sum(volumes[-period-1:-1]) / period
     return volumes[-1] / avg if avg > 0 else 1.0
 
+def delta_ratio(highs, lows, closes, volumes, period=20):
+    """Order-Flow-Naeherung ohne Tick-Daten (Idee: Close-Location-Delta).
+    Pro Kerze: wo im Range schliesst sie? clv = (2*close-high-low)/(high-low) in [-1,1].
+    clv*Volumen = geschaetztes Kauf-/Verkaufs-Delta. Summe der letzten `period` Kerzen,
+    normiert aufs Gesamtvolumen -> Wert in [-1,1]: >0 = Kaeufer aggressiv, <0 = Verkaeufer."""
+    n = min(period, len(closes), len(highs), len(lows), len(volumes))
+    if n < 5:
+        return 0.0
+    net = 0.0; tot = 0.0
+    for i in range(-n, 0):
+        rng = highs[i] - lows[i]
+        clv = ((2*closes[i] - highs[i] - lows[i]) / rng) if rng > 0 else 0.0
+        net += clv * volumes[i]; tot += volumes[i]
+    return (net / tot) if tot > 0 else 0.0
+
 def adx(highs, lows, closes, period=14):
     """Average Directional Index (Wilder) – Trendstaerke 0..100.
     >25 = klarer Trend, <20 = Seitwaerts/Gezappel. Bei zu wenig Daten -> 0.0 (unbekannt)."""
@@ -1068,139 +1083,6 @@ def _correlation_conflict(cand_sym, direction, corr_data, open_positions, max_co
 _regime_cache = {"data": None, "ts": 0}
 _deriv_cache  = {"data": None, "ts": 0}
 
-def fetch_coingecko_regime():
-    """Markt-Regime von CoinGecko (oeffentlich, kein Key): BTC-Dominanz, Gesamt-Market-Cap
-    (24h), und Trending-Coins. Fail-safe: bei Fehler letzter Cache/leer."""
-    if _regime_cache["data"] and time.time() - _regime_cache["ts"] < 120:
-        return _regime_cache["data"]
-    out = {"btc_dominance": None, "eth_dominance": None,
-           "total_mcap_usd": None, "mcap_change_24h": None, "trending": []}
-    try:
-        g = requests.get("https://api.coingecko.com/api/v3/global", timeout=10)
-        if g.status_code == 200:
-            d = g.json().get("data", {})
-            mcp = d.get("market_cap_percentage", {})
-            out["btc_dominance"]   = round(float(mcp.get("btc", 0)), 2)
-            out["eth_dominance"]   = round(float(mcp.get("eth", 0)), 2)
-            out["total_mcap_usd"]  = float(d.get("total_market_cap", {}).get("usd", 0))
-            out["mcap_change_24h"] = round(float(d.get("market_cap_change_percentage_24h_usd", 0)), 2)
-    except Exception as e:
-        log.debug(f"CG global: {e}")
-    try:
-        t = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=10)
-        if t.status_code == 200:
-            for c in t.json().get("coins", [])[:7]:
-                it = c.get("item", {})
-                out["trending"].append({
-                    "name":   it.get("name", ""),
-                    "symbol": (it.get("symbol", "") or "").upper(),
-                    "rank":   it.get("market_cap_rank"),
-                })
-    except Exception as e:
-        log.debug(f"CG trending: {e}")
-    _regime_cache.update({"data": out, "ts": time.time()})
-    return out
-
-def fetch_derivatives(bases=None):
-    """Aggregierte Derivate-Daten (Open Interest, Funding, Long/Short, Liquidationen) von
-    Coinalyze. Braucht einen kostenlosen API-Key (Settings). Nutzt Binance-Perps (`.A`),
-    da dort alle Majors verfuegbar sind. Fail-safe: kein Key/Fehler -> {error, rows:[]}."""
-    cfg = load_config()
-    key = str(cfg.get("coinalyze_key", "")).strip()
-    if not key:
-        return {"error": "no_key", "rows": []}
-    if _deriv_cache["data"] and time.time() - _deriv_cache["ts"] < 120:
-        return _deriv_cache["data"]
-
-    if not bases:
-        toks  = cfg.get("bots", {}).get("signal", {}).get("tokens", [])
-        bases = ["BTC", "ETH"] + [str(t).replace("USDT", "") for t in toks]
-    seen  = set()
-    bases = [b for b in bases if b and not (b in seen or seen.add(b))][:12]
-
-    syms = [f"{b}USDT_PERP.A" for b in bases]
-    csv  = ",".join(syms)
-    hdr  = {"api_key": key}
-
-    def _get(path, params):
-        try:
-            r = requests.get(f"https://api.coinalyze.net/v1/{path}",
-                             params=params, headers=hdr, timeout=12)
-            if r.status_code == 200:
-                return r.json()
-            if r.status_code in (401, 403):
-                return {"__auth__": True}
-            return []
-        except Exception:
-            return []
-
-    oi_raw = _get("open-interest", {"symbols": csv, "convert_to_usd": "true"})
-    if isinstance(oi_raw, dict) and oi_raw.get("__auth__"):
-        return {"error": "bad_key", "rows": []}
-    fr_raw = _get("funding-rate", {"symbols": csv})
-
-    now, frm = int(time.time()), int(time.time()) - 3 * 86400
-    ls_raw  = _get("long-short-ratio-history", {"symbols": csv, "interval": "daily", "from": frm, "to": now})
-    liq_raw = _get("liquidation-history", {"symbols": csv, "interval": "daily", "from": frm, "to": now, "convert_to_usd": "true"})
-
-    def _val_map(arr):
-        m = {}
-        if isinstance(arr, list):
-            for d in arr:
-                if isinstance(d, dict) and d.get("symbol") is not None:
-                    m[d["symbol"]] = d.get("value")
-        return m
-
-    def _last_hist(arr):
-        m = {}
-        if isinstance(arr, list):
-            for d in arr:
-                if isinstance(d, dict) and d.get("history"):
-                    m[d.get("symbol")] = d["history"][-1]
-        return m
-
-    oi, fr = _val_map(oi_raw), _val_map(fr_raw)
-    ls, liq = _last_hist(ls_raw), _last_hist(liq_raw)
-
-    def _num(d, *keys):
-        for k in keys:
-            v = d.get(k)
-            if isinstance(v, (int, float)):
-                return v
-        return None
-
-    rows = []
-    for b in bases:
-        s   = f"{b}USDT_PERP.A"
-        lsp = ls.get(s, {}) if isinstance(ls.get(s), dict) else {}
-        lqp = liq.get(s, {}) if isinstance(liq.get(s), dict) else {}
-        # Long/Short: Ratio bevorzugt (r), sonst aus long%/short% ableiten
-        ratio = _num(lsp, "r", "ratio")
-        long_pct = _num(lsp, "l", "long", "longs")
-        short_pct = _num(lsp, "s", "short", "shorts")
-        if ratio is None and long_pct is not None and short_pct not in (None, 0):
-            try: ratio = round(long_pct / short_pct, 2)
-            except Exception: ratio = None
-        rows.append({
-            "coin":      b,
-            "oi_usd":    oi.get(s),
-            "funding":   fr.get(s),
-            "ratio":     ratio,
-            "long_pct":  long_pct,
-            "short_pct": short_pct,
-            "liq_long":  _num(lqp, "l", "long", "longs"),
-            "liq_short": _num(lqp, "s", "short", "shorts"),
-        })
-
-    result = {"rows": rows}
-    _deriv_cache.update({"data": result, "ts": time.time()})
-    return result
-
-# ─────────────────────────────────────────────
-#  ORDER-BOOK-DRUCK (Kauf/Verkauf, Bitget public)
-# ─────────────────────────────────────────────
-_ob_cache = {}
-
 def fetch_orderbook_pressure(symbol, band=0.01):
     """Kauf-/Verkaufsdruck aus dem oeffentlichen Bitget-Orderbuch.
     ratio = Bid-Notional / Ask-Notional innerhalb +-band (Standard 1%) um den Mittelpreis.
@@ -1234,30 +1116,6 @@ def fetch_orderbook_pressure(symbol, band=0.01):
         return out
     except Exception:
         return None
-
-def fetch_orderbook_all(bases=None):
-    """Order-Book-Druck fuer mehrere Coins (fuer das Dashboard-Panel)."""
-    if not bases:
-        cfg   = load_config()
-        toks  = cfg.get("bots", {}).get("signal", {}).get("tokens", [])
-        bases = ["BTC", "ETH"] + [str(t).replace("USDT", "") for t in toks]
-    seen = set()
-    bases = [b for b in bases if b and not (b in seen or seen.add(b))][:12]
-    rows = []
-    for b in bases:
-        ob = fetch_orderbook_pressure(f"{b}USDT")
-        rows.append({"coin": b,
-                     "ratio":      (ob or {}).get("ratio"),
-                     "bid_vol":    (ob or {}).get("bid_vol"),
-                     "ask_vol":    (ob or {}).get("ask_vol"),
-                     "spread_bps": (ob or {}).get("spread_bps")})
-        time.sleep(0.05)
-    return {"rows": rows}
-
-# ─────────────────────────────────────────────
-#  TRADE-HISTORIE (alle Sub-Accounts)
-# ─────────────────────────────────────────────
-_trades_cache = {"data": [], "ts": 0}
 
 def fetch_all_trades(limit=100):
     if time.time() - _trades_cache["ts"] < 60:
@@ -1843,6 +1701,7 @@ def run_signal(flag):
     _day_anchor  = 0.0   # PnL zu Tagesbeginn (fuer das echte Tages-Verlustlimit)
     cooldown_until = {}  # sym -> Zeitpunkt, ab dem wieder gehandelt werden darf (Anti-Churn)
     trail          = {}  # sym -> {side, peak, stop} fuer den nachziehenden Trailing-Stop
+    close_warn_at  = {}  # sym -> Zeit der letzten "Schliessen fehlgeschlagen"-Warnung (Throttle)
 
     with plock:
         for t in tokens:
@@ -1897,6 +1756,7 @@ def run_signal(flag):
             use_volume=bc.get("use_volume",True); use_funding=bc.get("use_funding",True)
             use_fg=bc.get("use_fg",True);         use_news=bc.get("use_news",True)
             use_macro=bc.get("use_macro",True);   use_trend=bc.get("use_trend",False)
+            use_delta=bc.get("use_delta",True)    # Order-Flow/Delta-Faktor
             trend_len=max(20,int(bc.get("trend_len",50)))
             daily_limit = max(0.0, float(bc.get("daily_loss_limit_pct", 0))) / 100.0  # 0 = aus
             use_trend_gate = bc.get("use_trend_gate", True)        # harter Trend-Filter
@@ -1976,6 +1836,7 @@ def run_signal(flag):
                     es       = ema(closes, 20)
                     ml,ms    = macd_calc(closes)
                     vr       = vol_ratio(vols)
+                    dratio   = delta_ratio(highs, lows, closes, vols) if use_delta else 0.0
                     atr_val  = atr(highs, lows, closes, 14)
                     bb_u, bb_m, bb_l = bollinger(closes, 20, 2.0)
                     fr       = client.funding_rate(sym)
@@ -2006,6 +1867,7 @@ def run_signal(flag):
                         "orderbook": (1 if (ob_ratio and ob_ratio >= 1.3) else -1 if (ob_ratio and ob_ratio <= 0.77) else 0) if use_ob else 0,
                         "macro":    (max(-1, min(1, mscore)) + max(-2, min(0, ssoft))) if use_macro else 0,
                         "trend":    (1 if price_now > ema_long else -1) if use_trend else 0,
+                        "delta":    (1 if dratio > 0.15 else -1 if dratio < -0.15 else 0) if use_delta else 0,
                     }
                     sc = sum(parts.values())
                     # Modifier (kein additiver Faktor): sehr niedriges Volumen daempft das Signal
@@ -2140,31 +2002,40 @@ def run_signal(flag):
                             trail[sym] = st
                         _flip = (ps=="LONG" and sig=="SHORT") or (ps=="SHORT" and sig=="LONG")
                         if trail_hit or _flip:
-                            # Position schliessen (Trailing-Stop ODER Gegen-Trend-Signal) + verbuchen.
-                            client.place_futures_order(
+                            # Position schliessen (Trailing-Stop ODER Gegen-Trend-Signal).
+                            resp = client.place_futures_order(
                                 sym, "sell" if pos["holdSide"] == "long" else "buy",
                                 str(pos["total"]), close=True)
-                            upnl  = float(pos.get("unrealizedPL", 0))
-                            psize = float(pos.get("total", 0))
-                            fee   = (entry + price_now) * psize * fee_rate
-                            net   = upnl - fee
-                            realized_pnl += net
-                            db_save_trade("signal", cur, ps, entry, round(price_now,4),
-                                          round(net,4), fee=round(fee,6), size=psize)
-                            if net > 0: win_streak += 1; loss_streak = 0
-                            else:       loss_streak += 1; win_streak = 0
-                            with plock:
-                                pstate["bots"]["signal"].update({
-                                    "win_streak":win_streak, "loss_streak":loss_streak})
-                            open_pos_count = max(0, open_pos_count - 1)
-                            open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
-                            if cooldown_min > 0: cooldown_until[sym] = time.time() + cooldown_min*60
-                            trail.pop(sym, None)
-                            if trail_hit:
-                                blog("signal",f"{cur}: Trailing-Stop @ {price_now:.4f} (Stop {st['stop']:.4f}) -> geschlossen | PnL {net:+.2f}","TRADE")
+                            if resp.get("code") != "00000":
+                                # Schliessen fehlgeschlagen -> NICHT verbuchen (sonst Phantom-Verlust
+                                # jeden Zyklus, waehrend die Position offen bleibt). Gedrosselt warnen,
+                                # unrealisierten PnL weiter anzeigen; naechster Zyklus versucht es erneut.
+                                if time.time() - close_warn_at.get(sym, 0) > 300:
+                                    close_warn_at[sym] = time.time()
+                                    blog("signal",f"{cur}: Schliessen FEHLGESCHLAGEN ({ps} {pos.get('total')}) - {resp.get('msg','')}","WARN")
+                                cycle_unreal += float(pos.get("unrealizedPL", 0) or 0)
                             else:
-                                blog("signal",f"{cur}: Position gedreht","TRADE")
-                                if not blackout: _open(sig)
+                                upnl  = float(pos.get("unrealizedPL", 0))
+                                psize = float(pos.get("total", 0))
+                                fee   = (entry + price_now) * psize * fee_rate
+                                net   = upnl - fee
+                                realized_pnl += net
+                                db_save_trade("signal", cur, ps, entry, round(price_now,4),
+                                              round(net,4), fee=round(fee,6), size=psize)
+                                if net > 0: win_streak += 1; loss_streak = 0
+                                else:       loss_streak += 1; win_streak = 0
+                                with plock:
+                                    pstate["bots"]["signal"].update({
+                                        "win_streak":win_streak, "loss_streak":loss_streak})
+                                open_pos_count = max(0, open_pos_count - 1)
+                                open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
+                                if cooldown_min > 0: cooldown_until[sym] = time.time() + cooldown_min*60
+                                trail.pop(sym, None)
+                                if trail_hit:
+                                    blog("signal",f"{cur}: Trailing-Stop @ {price_now:.4f} (Stop {st['stop']:.4f}) -> geschlossen | PnL {net:+.2f}","TRADE")
+                                else:
+                                    blog("signal",f"{cur}: Position gedreht","TRADE")
+                                    if not blackout: _open(sig)
                         else:
                             # Position bleibt offen -> unrealisierten PnL fuer die Anzeige mitzaehlen
                             cycle_unreal += float(pos.get("unrealizedPL", 0) or 0)
@@ -3247,8 +3118,6 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <button class="tab" data-tab="markt" onclick="switchTab('markt')">MARKT</button>
   <button class="tab" data-tab="trades" onclick="switchTab('trades')">TRADES</button>
   <button class="tab" data-tab="backtest" onclick="switchTab('backtest')">BACKTEST</button>
-  <button class="tab" data-tab="correlation" onclick="switchTab('correlation')">KORRELATION</button>
-  <button class="tab" data-tab="derivate" onclick="switchTab('derivate')">DERIVATE</button>
   <button class="tab" data-tab="alerts" onclick="switchTab('alerts')">ALERTS</button>
   <button class="tab" data-tab="settings" onclick="switchTab('settings')">SETTINGS</button>
   <button class="tab" data-tab="syslog" onclick="switchTab('syslog')">SYSTEM-LOG</button>
@@ -3436,6 +3305,13 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
       <div class="card-value white" id="g-filled">0</div><div class="card-sub" id="g-range">–</div></div>
     <div class="card"><div class="card-label">Symbol</div>
       <div class="card-value white" id="g-symbol">–</div><div class="card-sub">Futures</div></div>
+  </div>
+  <div class="cfg-summary" id="g-settings">
+    <div class="cfg-sum-head">
+      <span data-i18n="cfg_configured">Aktuelle Konfiguration</span>
+      <button onclick="switchTab('settings')" class="cfg-sum-edit" data-i18n="cfg_edit">bearbeiten</button>
+    </div>
+    <div class="cfg-sum-grid" id="g-settings-grid"></div>
   </div>
   <div class="grid-vis">
     <div class="grid-label">Grid-Level</div>
@@ -3657,96 +3533,6 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
   <div id="bt-error" style="display:none;padding:16px;color:var(--red);font-size:11px"></div>
 </div>
 
-<!-- KORRELATION -->
-<div id="panel-correlation" class="panel">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px">
-    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="corr_title">KORRELATIONS-MATRIX</span>
-    <div style="display:flex;gap:8px;align-items:center">
-      <label style="font-size:10px;color:var(--muted)" data-i18n="corr_period">Zeitraum</label>
-      <select id="corr-period" onchange="loadCorrelation()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:inherit;font-size:11px;padding:4px 8px;border-radius:4px">
-        <option value="14">14 T</option>
-        <option value="30" selected>30 T</option>
-        <option value="60">60 T</option>
-        <option value="90">90 T</option>
-      </select>
-      <button class="btn" onclick="loadCorrelation()" style="--accent:var(--signal);padding:5px 12px" data-i18n="corr_refresh">Aktualisieren</button>
-    </div>
-  </div>
-  <div style="font-size:10px;color:var(--muted);margin-bottom:12px;line-height:1.5" data-i18n="corr_hint">
-    Korrelation der Tagesrenditen deiner Signal-Bot-Coins. Hohe positive Werte (rot) = die Coins bewegen sich gemeinsam &rarr; gleichzeitige Positionen erhoehen dein Risiko. Niedrige/negative Werte (gruen) = bessere Diversifikation.
-  </div>
-  <div id="corr-status" style="font-size:11px;color:var(--muted);padding:20px;text-align:center">Lade...</div>
-  <div id="corr-matrix" style="overflow-x:auto"></div>
-  <div style="display:flex;gap:14px;align-items:center;margin-top:14px;font-size:10px;color:var(--muted);flex-wrap:wrap">
-    <span data-i18n="corr_legend">Legende:</span>
-    <span><span style="display:inline-block;width:12px;height:12px;background:var(--red);border-radius:2px;vertical-align:middle"></span> &ge; 0.7 stark</span>
-    <span><span style="display:inline-block;width:12px;height:12px;background:var(--dca);border-radius:2px;vertical-align:middle"></span> 0.4&ndash;0.7 mittel</span>
-    <span><span style="display:inline-block;width:12px;height:12px;background:var(--dim);border-radius:2px;vertical-align:middle"></span> &plusmn;0.4 gering</span>
-    <span><span style="display:inline-block;width:12px;height:12px;background:var(--signal);border-radius:2px;vertical-align:middle"></span> &le; -0.4 negativ</span>
-  </div>
-</div>
-
-<!-- DERIVATE + MARKT-REGIME -->
-<div id="panel-derivate" class="panel">
-
-  <!-- Markt-Regime (CoinGecko) -->
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="reg_title">MARKT-REGIME (COINGECKO)</span>
-    <button class="btn" onclick="loadDerivate()" style="--accent:var(--signal);padding:5px 12px" data-i18n="reg_refresh">Aktualisieren</button>
-  </div>
-  <div class="grid g4" style="margin-bottom:10px">
-    <div class="card"><div class="card-label" data-i18n="reg_btc_dom">BTC-Dominanz</div>
-      <div class="card-value white" id="reg-btc">–</div><div class="card-sub">%</div></div>
-    <div class="card"><div class="card-label" data-i18n="reg_eth_dom">ETH-Dominanz</div>
-      <div class="card-value white" id="reg-eth">–</div><div class="card-sub">%</div></div>
-    <div class="card"><div class="card-label" data-i18n="reg_mcap">Market Cap 24h</div>
-      <div class="card-value" id="reg-mcap">–</div><div class="card-sub">%</div></div>
-    <div class="card"><div class="card-label" data-i18n="reg_trending">Trending</div>
-      <div id="reg-trending" style="font-size:11px;color:var(--text);line-height:1.6;margin-top:2px">–</div></div>
-  </div>
-  <div style="font-size:10px;color:var(--muted);margin-bottom:20px;line-height:1.5" data-i18n="reg_hint">
-    Hohe/steigende BTC-Dominanz = Kapital fliesst in BTC, Alts schwaecheln oft. Nutze das als groben Regime-Filter.
-  </div>
-
-  <!-- Derivate (Coinalyze) -->
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="deriv_title">DERIVATE-DATEN (COINALYZE)</span>
-  </div>
-  <div style="font-size:10px;color:var(--muted);margin-bottom:12px;line-height:1.5" data-i18n="deriv_hint">
-    Aggregierte Futures-Daten (Binance-Perps): Open Interest (offenes Kontraktvolumen), Funding Rate, Long/Short-Verhaeltnis und Liquidationen der letzten 24h. Braucht einen kostenlosen Coinalyze-API-Key (Settings → Globale API-Keys).
-  </div>
-  <div id="deriv-status" style="font-size:11px;color:var(--muted);padding:16px;text-align:center"></div>
-  <div class="rate-table" id="deriv-table-wrap" style="display:none">
-    <div class="ov-head" style="grid-template-columns:70px 1fr 90px 90px 110px">
-      <span data-i18n="deriv_coin">Coin</span>
-      <span data-i18n="deriv_oi">Open Interest</span>
-      <span data-i18n="deriv_funding">Funding</span>
-      <span data-i18n="deriv_ls">Long/Short</span>
-      <span data-i18n="deriv_liq">Liq. 24h (L/S)</span>
-    </div>
-    <div id="deriv-rows"></div>
-  </div>
-
-  <!-- Order-Book-Druck (Bitget public) -->
-  <div style="display:flex;justify-content:space-between;align-items:center;margin:22px 0 10px">
-    <span style="font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--muted)" data-i18n="ob_title">ORDER-BOOK-DRUCK (BITGET)</span>
-  </div>
-  <div style="font-size:10px;color:var(--muted);margin-bottom:12px;line-height:1.5" data-i18n="ob_hint">
-    Kauf-/Verkaufsdruck aus dem Live-Orderbuch: Verhaeltnis von Kauf- zu Verkaufsvolumen im Bereich &plusmn;1 % um den Preis. &gt;1 (gruen) = Kaufdruck ueberwiegt, &lt;1 (rot) = Verkaufsdruck. Kurzfristig und kann durch Fake-Walls verzerrt sein.
-  </div>
-  <div id="ob-status" style="font-size:11px;color:var(--muted);padding:16px;text-align:center">Lade...</div>
-  <div class="rate-table" id="ob-table-wrap" style="display:none">
-    <div class="ov-head" style="grid-template-columns:70px 1fr 110px 110px 90px">
-      <span data-i18n="deriv_coin">Coin</span>
-      <span data-i18n="ob_pressure">Druck (Bid/Ask)</span>
-      <span data-i18n="ob_bidvol">Kaufvol.</span>
-      <span data-i18n="ob_askvol">Verkaufsvol.</span>
-      <span data-i18n="ob_spread">Spread</span>
-    </div>
-    <div id="ob-rows"></div>
-  </div>
-</div>
-
 <!-- ALERTS -->
 <div id="panel-alerts" class="panel">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
@@ -3939,6 +3725,7 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
             <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-fg" style="width:auto"> Fear &amp; Greed</label>
             <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-news" style="width:auto"> News</label>
             <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-macro" style="width:auto"> Makro</label>
+            <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="sig-f-delta" style="width:auto"> Delta (Order-Flow)</label>
           </div>
         </div>
         <div class="settings-note" data-i18n="note_factors">Score-Faktoren: schalte einzelne Indikatoren an/aus. Alle bestehenden sind standardmaessig an. Die Beitraege jedes Faktors siehst du live im SIGNAL-Tab pro Coin.</div>
@@ -4133,6 +3920,7 @@ const STRINGS = {
     cfg_tokens:'Coins', cfg_leverage:'Hebel', cfg_budget:'Budget', cfg_stake:'Einsatz/Trade',
     cfg_sltp:'SL / TP', cfg_maxconc:'Max. gleichzeitig', cfg_threshold:'Signal-Schwelle',
     cfg_interval:'Pruef-Intervall', cfg_full_bal:'volle Balance', cfg_fixed:'fix', cfg_score_factors:'Score-Faktoren',
+    cfg_range:'Range', cfg_step:'Stufe', cfg_levels:'Levels', cfg_smartrange:'Smart-Range', cfg_account:'Konto-Hebel', cfg_off:'aus',
     lbl_step:'Stufengroesse (USDT, 0 = aus)',
     hint_step:'Wenn > 0 und Preis oben/unten = 0: Range wird automatisch so gesetzt, dass jede Stufe so gross ist (z.B. 100 = 100-USDT-Schritte um den aktuellen Preis).',
     lbl_smart_hours:'Smart-Range Rueckblick (h)',
@@ -4304,6 +4092,7 @@ const STRINGS = {
     cfg_tokens:'Coins', cfg_leverage:'Leverage', cfg_budget:'Budget', cfg_stake:'Stake/trade',
     cfg_sltp:'SL / TP', cfg_maxconc:'Max concurrent', cfg_threshold:'Signal threshold',
     cfg_interval:'Check interval', cfg_full_bal:'full balance', cfg_fixed:'fixed', cfg_score_factors:'Score factors',
+    cfg_range:'Range', cfg_step:'Step', cfg_levels:'Levels', cfg_smartrange:'Smart-Range', cfg_account:'account lev', cfg_off:'off',
     lbl_step:'Step size (USDT, 0 = off)',
     hint_step:'If > 0 and upper/lower price = 0: the range is set automatically so each step is this size (e.g. 100 = 100-USDT steps around the current price).',
     lbl_smart_hours:'Smart-Range lookback (h)',
@@ -4592,7 +4381,7 @@ function applyLang() {
     overview:'nav_overview', signal:'nav_signal', grid:'nav_grid',
     dca:'nav_dca', markt:'nav_markt',
     trades:'nav_trades',
-    backtest:'nav_backtest', correlation:'nav_correlation', derivate:'nav_derivate', alerts:'nav_alerts', settings:'nav_settings',
+    backtest:'nav_backtest', alerts:'nav_alerts', settings:'nav_settings',
     syslog:'nav_syslog',
   };
   document.querySelectorAll('.tab[data-tab]').forEach(btn => {
@@ -5167,184 +4956,6 @@ function renderTradeTiming(data) {
   ).join('');
 }
 
-// -- KORRELATIONS-MATRIX --------------------------------------
-async function loadCorrelation() {
-  const status = document.getElementById('corr-status');
-  const matrix = document.getElementById('corr-matrix');
-  if (status) { status.style.display = 'block'; status.textContent = t('running') === 'RUNNING' ? 'Lade...' : 'Loading...'; }
-  if (matrix) matrix.innerHTML = '';
-  try {
-    const days = parseInt(document.getElementById('corr-period')?.value) || 30;
-    const r = await fetch('/api/correlation', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({period_days:days})});
-    const d = await r.json();
-    renderCorrelation(d);
-  } catch(e) {
-    if (status) { status.style.display='block'; status.textContent = 'Fehler: ' + e.message; }
-  }
-}
-
-function corrColor(v) {
-  // v in [-1,1]. Hohe positive Korrelation = Risiko (rot), negativ = gut (gruen).
-  if (v >= 0.7)  return 'rgba(248,113,113,.85)';   // --red
-  if (v >= 0.4)  return 'rgba(251,191,36,.75)';    // --dca amber
-  if (v <= -0.4) return 'rgba(0,214,143,.75)';     // --signal green
-  return 'rgba(80,80,90,.35)';                      // neutral
-}
-
-function renderCorrelation(d) {
-  const status = document.getElementById('corr-status');
-  const box    = document.getElementById('corr-matrix');
-  if (!box) return;
-  const syms = d.symbols || [];
-  const m    = d.matrix || [];
-  if (syms.length < 2) {
-    if (status) { status.style.display='block'; status.textContent = 'Nicht genug Daten (mind. 2 Coins mit Kursdaten noetig).'; }
-    box.innerHTML = ''; return;
-  }
-  if (status) status.style.display = 'none';
-  let html = '<table style="border-collapse:collapse;font-size:11px">';
-  html += '<tr><th style="padding:6px"></th>' +
-    syms.map(s => '<th style="padding:6px 8px;color:var(--muted);font-weight:600">'+esc(s)+'</th>').join('') + '</tr>';
-  for (let i=0; i<syms.length; i++) {
-    html += '<tr><th style="padding:6px 8px;color:var(--muted);font-weight:600;text-align:right">'+esc(syms[i])+'</th>';
-    for (let j=0; j<syms.length; j++) {
-      const v = (m[i]||[])[j];
-      const val = (typeof v === 'number') ? v : 0;
-      const bg  = i===j ? 'rgba(80,80,90,.55)' : corrColor(val);
-      const txt = i===j ? '—' : (val>=0?'+':'')+val.toFixed(2);
-      html += '<td style="padding:6px 8px;text-align:center;background:'+bg+';color:var(--white);border:1px solid var(--bg);min-width:44px">'+txt+'</td>';
-    }
-    html += '</tr>';
-  }
-  html += '</table>';
-  const note = (_lang==='en')
-    ? `Based on ${d.period_days}-day daily returns · ${d.count} coins`
-    : `Basiert auf ${d.period_days}-Tage-Tagesrenditen · ${d.count} Coins`;
-  html += '<div style="font-size:10px;color:var(--muted);margin-top:8px">'+note+'</div>';
-  box.innerHTML = html;
-}
-
-// -- DERIVATE + MARKT-REGIME ----------------------------------
-async function loadDerivate() {
-  loadRegime();
-  loadDerivatives();
-  loadOrderbook();
-}
-
-function obColor(r) {
-  if (r == null) return '#888';
-  if (r >= 1.3)  return 'var(--signal)';
-  if (r <= 0.77) return 'var(--red)';
-  if (r >= 1.05) return '#7fd8b0';
-  if (r <= 0.95) return '#e59aa0';
-  return '#888';
-}
-
-async function loadOrderbook() {
-  const status = document.getElementById('ob-status');
-  const wrap   = document.getElementById('ob-table-wrap');
-  status.style.display = 'block'; wrap.style.display = 'none';
-  status.textContent = (_lang==='en'?'Loading…':'Lade…');
-  try {
-    const r = await fetch('/api/orderbook');
-    const d = await r.json();
-    const rows = (d.rows||[]).filter(x => x.ratio != null);
-    if (!rows.length) { status.textContent = (_lang==='en'?'No data.':'Keine Daten.'); return; }
-    document.getElementById('ob-rows').innerHTML = (d.rows||[]).map(x => {
-      const col = obColor(x.ratio);
-      const bar = x.ratio==null ? '' :
-        '<span style="display:inline-block;height:6px;width:'+Math.min(100,Math.max(6,x.ratio*40))+'px;background:'+col+';border-radius:3px;margin-left:8px;vertical-align:middle"></span>';
-      return '<div class="ov-row" style="grid-template-columns:70px 1fr 110px 110px 90px">' +
-        '<span style="font-weight:600;color:var(--white)">'+esc(x.coin)+'</span>' +
-        '<span style="color:'+col+';font-weight:600">'+(x.ratio==null?'–':x.ratio)+bar+'</span>' +
-        '<span class="green">'+fmtUsdShort(x.bid_vol)+'</span>' +
-        '<span class="red">'+fmtUsdShort(x.ask_vol)+'</span>' +
-        '<span style="font-size:10px;color:var(--muted)">'+(x.spread_bps==null?'–':x.spread_bps+' bps')+'</span>' +
-      '</div>';
-    }).join('');
-    status.style.display = 'none';
-    wrap.style.display = 'block';
-  } catch(e) {
-    status.textContent = 'Fehler: ' + e.message;
-  }
-}
-
-async function loadRegime() {
-  try {
-    const r = await fetch('/api/regime');
-    const d = await r.json();
-    const fmtPct = v => (v==null?'–':(v>=0?'+':'')+Number(v).toFixed(2));
-    document.getElementById('reg-btc').textContent  = d.btc_dominance==null?'–':Number(d.btc_dominance).toFixed(2);
-    document.getElementById('reg-eth').textContent  = d.eth_dominance==null?'–':Number(d.eth_dominance).toFixed(2);
-    const mc = document.getElementById('reg-mcap');
-    mc.textContent = fmtPct(d.mcap_change_24h);
-    mc.className = 'card-value ' + (Number(d.mcap_change_24h)>=0?'green':'red');
-    const tr = document.getElementById('reg-trending');
-    tr.innerHTML = (d.trending&&d.trending.length)
-      ? d.trending.slice(0,5).map(c=>esc(c.symbol)).join(' · ')
-      : '–';
-  } catch(e) {}
-}
-
-function fmtUsdShort(v) {
-  if (v==null || isNaN(v)) return '–';
-  const a = Math.abs(v);
-  if (a >= 1e9) return (v/1e9).toFixed(2)+'B';
-  if (a >= 1e6) return (v/1e6).toFixed(1)+'M';
-  if (a >= 1e3) return (v/1e3).toFixed(1)+'K';
-  return Number(v).toFixed(0);
-}
-
-async function loadDerivatives() {
-  const status = document.getElementById('deriv-status');
-  const wrap   = document.getElementById('deriv-table-wrap');
-  status.style.display = 'block'; wrap.style.display = 'none';
-  status.textContent = (_lang==='en'?'Loading…':'Lade…');
-  try {
-    const r = await fetch('/api/derivatives');
-    const d = await r.json();
-    if (d.error === 'no_key') {
-      status.innerHTML = (_lang==='en')
-        ? 'No Coinalyze API key set. Add a free key under <b>Settings → Global API keys</b>.'
-        : 'Kein Coinalyze-API-Key gesetzt. Trage einen kostenlosen Key unter <b>Settings → Globale API-Keys</b> ein.';
-      return;
-    }
-    if (d.error === 'bad_key') {
-      status.textContent = (_lang==='en')
-        ? 'Coinalyze API key invalid — please check it in Settings.'
-        : 'Coinalyze-API-Key ungueltig — bitte in den Settings pruefen.';
-      return;
-    }
-    const rows = d.rows || [];
-    if (!rows.length) { status.textContent = (_lang==='en'?'No data.':'Keine Daten.'); return; }
-    document.getElementById('deriv-rows').innerHTML = rows.map(x => {
-      const fr = x.funding==null ? '–' : (x.funding>=0?'+':'')+(x.funding*100).toFixed(4)+'%';
-      const frCol = x.funding==null?'#888':(x.funding>0?'var(--red)':x.funding<0?'var(--signal)':'#888');
-      let ls = '–', lsCol = '#888';
-      if (x.ratio!=null) {
-        ls = Number(x.ratio).toFixed(2);
-        lsCol = x.ratio>1.1?'var(--signal)':x.ratio<0.9?'var(--red)':'#888';
-      } else if (x.long_pct!=null && x.short_pct!=null) {
-        ls = Math.round(x.long_pct)+'/'+Math.round(x.short_pct);
-      }
-      const liq = (x.liq_long!=null||x.liq_short!=null)
-        ? fmtUsdShort(x.liq_long)+' / '+fmtUsdShort(x.liq_short) : '–';
-      return '<div class="ov-row" style="grid-template-columns:70px 1fr 90px 90px 110px">' +
-        '<span style="font-weight:600;color:var(--white)">'+esc(x.coin)+'</span>' +
-        '<span class="blue">'+fmtUsdShort(x.oi_usd)+'</span>' +
-        '<span style="color:'+frCol+'">'+fr+'</span>' +
-        '<span style="color:'+lsCol+'">'+ls+'</span>' +
-        '<span style="font-size:10px;color:var(--muted)">'+liq+'</span>' +
-      '</div>';
-    }).join('');
-    status.style.display = 'none';
-    wrap.style.display = 'block';
-  } catch(e) {
-    status.textContent = 'Fehler: ' + e.message;
-  }
-}
-
-// -- CIRCUIT BREAKER BADGE ------------------------------------
 async function checkCircuitBreaker() {
   try {
     const r = await fetch('/api/circuit_status', {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
@@ -5978,12 +5589,11 @@ function switchTab(id) {
   activePanel = id;
   if (id === 'settings')  fillSettingsForm();  // holt /api/config selbst - unabhaengig von lastState (Fix: nach F5 war das Formular sonst leer)
   if (id === 'signal')    loadSignalSettings();
+  if (id === 'grid')      loadGridSettings();
   if (id === 'syslog')    loadSyslog();
   if (id === 'overview')  { loadPositions(); loadFGHistory(); }
   if (id === 'markt')     { loadMarket(); loadKalender(false); }
   if (id === 'alerts')    { loadAlerts(); loadAlertLog(); }
-  if (id === 'correlation') loadCorrelation();
-  if (id === 'derivate')  loadDerivate();
   if (id === 'grid')      loadGridInstances();
   if (id === 'grid') {
     setTimeout(() => {
@@ -6051,6 +5661,26 @@ function loadSignalSettings() {
   fetch('/api/config').then(r=>r.json()).then(cfg => renderSignalSettings(cfg))
     .catch(e=>console.error('loadSignalSettings:', e));
 }
+function loadGridSettings() {
+  fetch('/api/config').then(r=>r.json()).then(cfg => renderGridSettings(cfg))
+    .catch(e=>console.error('loadGridSettings:', e));
+}
+function renderGridSettings(cfg) {
+  const grid = document.getElementById('g-settings-grid');
+  if (!grid) return;
+  const g = (cfg.bots && cfg.bots.grid) || {};
+  const rng = (g.upper_price && g.lower_price) ? g.lower_price+'–'+g.upper_price
+            : (g.step_size>0 ? 'auto ('+t('cfg_step')+' '+g.step_size+')' : t('cfg_smartrange')+' '+(g.smart_range_hours ?? 24)+'h');
+  const item = (k,v)=>`<div class="cfg-sum-item"><span class="cfg-sum-k">${k}</span><span class="cfg-sum-v">${v}</span></div>`;
+  grid.innerHTML =
+    item('Symbol',        g.symbol || 'BTCUSDT') +
+    item(t('cfg_range'),  rng) +
+    item(t('cfg_step'),   (g.step_size>0 ? g.step_size+' USDT' : '–')) +
+    item(t('cfg_levels'), g.grid_count ?? 10) +
+    item(t('cfg_budget'), (g.investment ?? 100)+' USDT') +
+    item(t('cfg_leverage'), (g.leverage>0 ? g.leverage+'x' : t('cfg_account'))) +
+    item('Stop-Loss',     (g.stop_loss_pct>0 ? (g.stop_loss_pct*100).toFixed(1)+'%' : t('cfg_off')));
+}
 function renderSignalSettings(cfg) {
   const grid = document.getElementById('s-settings-grid');
   const filt = document.getElementById('s-settings-filters');
@@ -6077,7 +5707,7 @@ function renderSignalSettings(cfg) {
   const chips = [
     ['EMA','use_ema'],['RSI','use_rsi'],['MACD','use_macd'],['BB','use_bb'],
     ['Volume','use_volume'],['Funding','use_funding'],['Fear&Greed','use_fg'],
-    ['News','use_news'],['Makro','use_macro'],['Trend','use_trend'],
+    ['News','use_news'],['Makro','use_macro'],['Trend','use_trend'],['Delta','use_delta'],
     ['Korrelation','use_correlation_filter'],['ADX','use_adx_filter'],['Orderbook','use_orderbook_signal'],
   ];
   filt.innerHTML = `<span class="cfg-sum-k" style="width:100%;margin-bottom:2px">${t('cfg_score_factors')}</span>` +
@@ -6414,6 +6044,7 @@ function fillSettingsForm(state) {
     sf('volume').checked=(sg.use_volume!==false); sf('funding').checked=(sg.use_funding!==false);
     sf('fg').checked=(sg.use_fg!==false); sf('news').checked=(sg.use_news!==false);
     sf('macro').checked=(sg.use_macro!==false); sf('trend').checked=(sg.use_trend===true);
+    sf('delta').checked=(sg.use_delta!==false);
     document.getElementById('sig-trend-len').value = s(sg.trend_len ?? 50);
     document.getElementById('sig-thresh').value = s(b.signal?.signal_threshold||3);
     document.getElementById('sig-daily-limit').value = s(b.signal?.daily_loss_limit_pct||0);
@@ -6486,6 +6117,7 @@ async function saveSettings() {
         use_fg:      document.getElementById('sig-f-fg')?.checked ?? true,
         use_news:    document.getElementById('sig-f-news')?.checked ?? true,
         use_macro:   document.getElementById('sig-f-macro')?.checked ?? true,
+        use_delta:   document.getElementById('sig-f-delta')?.checked ?? true,
         use_trend:   document.getElementById('sig-f-trend')?.checked ?? false,
         trend_len:   int('sig-trend-len') || 50,
         signal_threshold: int('sig-thresh')   || 3,
@@ -6745,12 +6377,6 @@ class Handler(BaseHTTPRequestHandler):
             self._json(fetch_all_positions())
         elif self.path == "/api/fg_history":
             self._json(fetch_fg_history())
-        elif self.path == "/api/regime":
-            self._json(fetch_coingecko_regime())
-        elif self.path == "/api/derivatives":
-            self._json(fetch_derivatives())
-        elif self.path == "/api/orderbook":
-            self._json(fetch_orderbook_all())
         elif self.path == "/api/alert_log":
             with _alert_lock:
                 self._json(list(_alert_log))
@@ -6932,10 +6558,6 @@ class Handler(BaseHTTPRequestHandler):
 
         elif self.path == "/api/trade_timing":
             self._json(db_trade_timing())
-
-        elif self.path == "/api/correlation":
-            syms = data.get("symbols") if isinstance(data.get("symbols"), list) else None
-            self._json(compute_correlation(syms, data.get("period_days", 30)))
 
         elif self.path == "/api/circuit_status":
             self._json({"open": _circuit_open, "until": _circuit_until})
