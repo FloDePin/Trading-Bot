@@ -112,15 +112,15 @@ def db_get_trades(bot=None, limit=200):
             try:
                 if bot and bot != "all":
                     rows = conn.execute(
-                        'SELECT ts,bot,symbol,side,entry,exit_price,pnl,fee FROM trades WHERE bot=? ORDER BY ts DESC LIMIT ?',
+                        'SELECT ts,bot,symbol,side,entry,exit_price,pnl,fee,size FROM trades WHERE bot=? ORDER BY ts DESC LIMIT ?',
                         (bot, limit)).fetchall()
                 else:
                     rows = conn.execute(
-                        'SELECT ts,bot,symbol,side,entry,exit_price,pnl,fee FROM trades ORDER BY ts DESC LIMIT ?',
+                        'SELECT ts,bot,symbol,side,entry,exit_price,pnl,fee,size FROM trades ORDER BY ts DESC LIMIT ?',
                         (limit,)).fetchall()
             finally:
                 conn.close()
-        cols = ['ts','bot','symbol','side','entry','exit','pnl','fee']
+        cols = ['ts','bot','symbol','side','entry','exit','pnl','fee','size']
         return [dict(zip(cols, r)) for r in rows]
     except: return []
 
@@ -1124,6 +1124,9 @@ def fetch_orderbook_pressure(symbol, band=0.01):
     except Exception:
         return None
 
+_ob_cache = {}                              # (versehentlich beim Tab-Ausbau geloescht, wieder da)
+_trades_cache = {"data": [], "ts": 0}       # Cache fuer /api/trades
+
 def fetch_all_trades(limit=100):
     if time.time() - _trades_cache["ts"] < 60:
         return _trades_cache["data"]
@@ -1709,6 +1712,7 @@ def run_signal(flag):
     cooldown_until = {}  # sym -> Zeitpunkt, ab dem wieder gehandelt werden darf (Anti-Churn)
     trail          = {}  # sym -> {side, peak, stop} fuer den nachziehenden Trailing-Stop
     close_warn_at  = {}  # sym -> Zeit der letzten "Schliessen fehlgeschlagen"-Warnung (Throttle)
+    degen_at       = {}  # sym -> Zeit der letzten "Kursdaten unbrauchbar"-Warnung (Throttle)
 
     with plock:
         for t in tokens:
@@ -1852,6 +1856,14 @@ def run_signal(flag):
                     sent     = news_sentiment(cur)
 
                     price_now = closes[-1]
+                    # Degenerate-Daten-Schutz (Demo-Glitch, s. XRP RSI=100/Preis eingefroren):
+                    # eingefrorene Kerzen ODER RSI am Anschlag -> Coin diesen Zyklus ueberspringen,
+                    # damit NICHT auf kaputten Daten gehandelt wird. Gedrosselt warnen (10 min).
+                    if (max(closes[-10:]) == min(closes[-10:])) or rv >= 99.9 or rv <= 0.1:
+                        if time.time() - degen_at.get(sym, 0) > 600:
+                            degen_at[sym] = time.time()
+                            blog("signal", f"{cur}: Kursdaten unbrauchbar (RSI={rv:.0f}, Preis {price_now}) - uebersprungen", "WARN")
+                        continue
                     ema_long  = ema(closes, trend_len) if (use_trend or use_trend_gate) else 0.0
                     adx_val   = adx(highs, lows, closes, 14)
                     ob_ratio  = None
@@ -2267,10 +2279,15 @@ def run_grid(flag):
                         if held: held.pop()
                         trades += 1
                         _persist_grid()
-                    if resp:
-                        status = "✓" if ok else f"Fehler {resp.get('msg','')}"
-                        blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx+1}/{n}] {status}",
-                             "TRADE" if ok else "ERROR")
+                    elif resp and "no position" in str(resp.get("msg","")).lower():
+                        # Konto hat keine Position -> lokale Buchhaltung war stale (z.B. nach manuellem
+                        # "Close all"). Auf 0 syncen, damit der Grid nicht weiter Phantom-Bestand verkauft.
+                        net_qty = 0.0; held = []; _persist_grid()
+                        blog("grid","Bestand auf 0 synchronisiert (Konto hat keine Position)","WARN")
+                    elif resp:
+                        blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx+1}/{n}] Fehler {resp.get('msg','')}","ERROR")
+                    if ok:
+                        blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx+1}/{n}] ✓","TRADE")
 
             bal = client.balance(retries=2) or start_bal
             with plock:
@@ -2467,9 +2484,12 @@ def run_grid_instance(flag, inst_cfg, inst_id):
                         if held: held.pop()
                         trades += 1
                         _persist_grid()
-                    istatus = "OK" if ok else f"Fehler {resp.get('msg','')}"
-                    _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx+1}/{n} {istatus}",
-                          "TRADE" if ok else "ERROR")
+                        _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx+1}/{n} OK","TRADE")
+                    elif resp and "no position" in str(resp.get("msg","")).lower():
+                        net_qty = 0.0; held = []; _persist_grid()
+                        _ilog(inst_id, name, "Bestand auf 0 synchronisiert (Konto hat keine Position)","WARN")
+                    else:
+                        _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx+1}/{n} Fehler {resp.get('msg','')}","ERROR")
 
             bal = client.balance(retries=2) or start_bal
             with plock:
@@ -6359,7 +6379,23 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/market":
             self._json(fetch_market_overview())
         elif self.path == "/api/trades":
-            self._json(fetch_all_trades())
+            # Aus der lokalen DB (eigene gebuchte Trades) statt vom Bitget-Fills-Endpunkt -
+            # zuverlaessig UND UTA-kompatibel. Auf die Felder mappen, die das Frontend erwartet.
+            _out = []
+            for _t in db_get_trades(None, 200):
+                try:    _ts = datetime.fromtimestamp(int(_t.get("ts",0))/1000).strftime("%d.%m %H:%M")
+                except: _ts = ""
+                _out.append({
+                    "bot":      _t.get("bot",""),
+                    "time_str": _ts,
+                    "symbol":   _t.get("symbol",""),
+                    "side":     "buy" if str(_t.get("side","")).upper() == "LONG" else "sell",
+                    "price":    float(_t.get("exit",0) or 0),
+                    "size":     float(_t.get("size",0) or 0),
+                    "pnl":      float(_t.get("pnl",0) or 0),
+                    "fee":      float(_t.get("fee",0) or 0),
+                })
+            self._json(_out)
         elif self.path == "/api/positions":
             self._json(fetch_all_positions())
         elif self.path == "/api/fg_history":
