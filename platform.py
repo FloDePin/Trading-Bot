@@ -179,6 +179,8 @@ DEFAULT_CONFIG = {
             "daily_loss_limit_pct": 0.0,  # Tages-Verlustlimit in % (0 = aus). >0 = pausiert bis zum naechsten UTC-Tag.
             "use_trend_gate": True,       # harter Trend-Filter: ueber EMA nur Long, darunter nur Short
             "trade_cooldown_min": 20,     # Sperre pro Coin nach dem Schliessen (Minuten, 0 = aus) - Anti-Churn
+            "use_trailing": True,         # Trailing-Stop: Stop zieht mit dem Gewinn nach (statt festem TP)
+            "trail_atr_mult": 2.0,        # Trailing-Abstand = ATR * dieser Faktor
         },
         "grid": {
             "name": "Grid Bot", "enabled": False, "autostart": False,
@@ -1702,7 +1704,7 @@ def _ensure_sltp(client, sym, direction, sl, tp, size):
             return
         hold = "long" if direction == "LONG" else "short"
         for plan, trig, missing in (("pos_loss", sl, not has_sl), ("pos_profit", tp, not has_tp)):
-            if not missing:
+            if not missing or trig is None:   # trig None = Trailing aktiv (kein festes TP) -> nicht nachruesten
                 continue
             r = client.post("/api/v2/mix/order/place-tpsl-order", {
                 "symbol": sym, "productType": PRODUCT_TYPE, "marginCoin": MARGIN_COIN,
@@ -1840,6 +1842,7 @@ def run_signal(flag):
     _day         = datetime.utcnow().strftime("%Y-%m-%d")  # aktueller UTC-Handelstag
     _day_anchor  = 0.0   # PnL zu Tagesbeginn (fuer das echte Tages-Verlustlimit)
     cooldown_until = {}  # sym -> Zeitpunkt, ab dem wieder gehandelt werden darf (Anti-Churn)
+    trail          = {}  # sym -> {side, peak, stop} fuer den nachziehenden Trailing-Stop
 
     with plock:
         for t in tokens:
@@ -1898,6 +1901,8 @@ def run_signal(flag):
             daily_limit = max(0.0, float(bc.get("daily_loss_limit_pct", 0))) / 100.0  # 0 = aus
             use_trend_gate = bc.get("use_trend_gate", True)        # harter Trend-Filter
             cooldown_min   = max(0, int(bc.get("trade_cooldown_min", 20)))  # Anti-Churn (Minuten)
+            use_trailing   = bc.get("use_trailing", True)          # Trailing-Stop
+            trail_mult     = max(0.3, float(bc.get("trail_atr_mult", 2.0)))  # Trailing-Abstand in ATR
             fkey            = _cfg.get("finnhub_key","")
 
             bal = client.balance(retries=3) or start_bal
@@ -2094,6 +2099,7 @@ def run_signal(flag):
                             blog("signal",f"{cur}: Order abgebrochen – {why} (Menge '{qs}')","ERROR")
                             return
                         sl, tp = calc_sl_tp(px, direction)
+                        if use_trailing: tp = None   # Trailing uebernimmt den Gewinn-Exit -> kein festes TP
                         resp = client.place_futures_order(
                             sym, "buy" if direction == "LONG" else "sell", qs,
                             close=False, tp=tp, sl=sl)
@@ -2102,22 +2108,42 @@ def run_signal(flag):
                             # neue Position in die Zyklus-Liste aufnehmen, damit spaetere
                             # Symbole im selben Zyklus den Korrelations-Check gegen sie sehen
                             open_positions.append((sym, direction))
+                            trail[sym] = {"side": direction, "peak": px, "stop": sl}  # Trailing-Start am Einstiegs-SL
                             with plock:
                                 pstate["bots"]["signal"]["trade_count"] += 1
-                            blog("signal",f"{cur}: {direction} @ {px:.2f} | SL={sl:.2f} TP={tp:.2f} ({this_trade:.0f} USDT)","TRADE")
+                            _tp_s = f"{tp:.2f}" if tp is not None else "Trailing"
+                            blog("signal",f"{cur}: {direction} @ {px:.2f} | SL={sl:.2f} TP={_tp_s} ({this_trade:.0f} USDT)","TRADE")
                             # SL/TP-Waechter: sicherstellen dass die Position wirklich geschuetzt ist
                             if use_sltp_guard:
                                 _ensure_sltp(client, sym, direction, sl, tp, qs)
 
                     if pos:
                         ps = "LONG" if pos["holdSide"]=="long" else "SHORT"
-                        if (ps=="LONG" and sig=="SHORT") or (ps=="SHORT" and sig=="LONG"):
+                        entry = float(pos.get("openPriceAvg", 0))
+                        # --- Trailing-Stop: Stop zieht mit dem Gewinn nach, nie zurueck. ---
+                        trail_hit = False
+                        if use_trailing and atr_val > 0 and entry > 0:
+                            tdist = atr_val * trail_mult
+                            st = trail.get(sym)
+                            if not st or st.get("side") != ps:
+                                # Fallback-Init (z.B. Bot-Neustart mit offener Position): Start am ATR-SL.
+                                _isl = (entry - atr_val*atr_sl_mult) if ps=="LONG" else (entry + atr_val*atr_sl_mult)
+                                st = {"side": ps, "peak": price_now, "stop": _isl}
+                            if ps == "LONG":
+                                st["peak"] = max(st["peak"], price_now)
+                                st["stop"] = max(st["stop"], st["peak"] - tdist)
+                                trail_hit = price_now <= st["stop"]
+                            else:
+                                st["peak"] = min(st["peak"], price_now)
+                                st["stop"] = min(st["stop"], st["peak"] + tdist)
+                                trail_hit = price_now >= st["stop"]
+                            trail[sym] = st
+                        _flip = (ps=="LONG" and sig=="SHORT") or (ps=="SHORT" and sig=="LONG")
+                        if trail_hit or _flip:
+                            # Position schliessen (Trailing-Stop ODER Gegen-Trend-Signal) + verbuchen.
                             client.place_futures_order(
                                 sym, "sell" if pos["holdSide"] == "long" else "buy",
                                 str(pos["total"]), close=True)
-                            # Buchhaltung fuer die gedrehte (geschlossene) Position - sonst
-                            # taucht der Trade nie in DB/Historie auf und die Streak stimmt nicht.
-                            entry = float(pos.get("openPriceAvg", 0))
                             upnl  = float(pos.get("unrealizedPL", 0))
                             psize = float(pos.get("total", 0))
                             fee   = (entry + price_now) * psize * fee_rate
@@ -2133,8 +2159,12 @@ def run_signal(flag):
                             open_pos_count = max(0, open_pos_count - 1)
                             open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
                             if cooldown_min > 0: cooldown_until[sym] = time.time() + cooldown_min*60
-                            blog("signal",f"{cur}: Position gedreht","TRADE")
-                            if not blackout: _open(sig)
+                            trail.pop(sym, None)
+                            if trail_hit:
+                                blog("signal",f"{cur}: Trailing-Stop @ {price_now:.4f} (Stop {st['stop']:.4f}) -> geschlossen | PnL {net:+.2f}","TRADE")
+                            else:
+                                blog("signal",f"{cur}: Position gedreht","TRADE")
+                                if not blackout: _open(sig)
                         else:
                             # Position bleibt offen -> unrealisierten PnL fuer die Anzeige mitzaehlen
                             cycle_unreal += float(pos.get("unrealizedPL", 0) or 0)
@@ -2164,6 +2194,7 @@ def run_signal(flag):
                             open_pos_count = max(0, open_pos_count - 1)
                             open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
                             if cooldown_min > 0: cooldown_until[sym] = time.time() + cooldown_min*60
+                            trail.pop(sym, None)   # Position extern geschlossen -> Trail verwerfen
                         if sig in ("LONG","SHORT") and not blackout:
                             _open(sig)
                     with plock:
@@ -3921,6 +3952,9 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="settings-note" data-i18n="hint_trend_gate">Ueber der langen EMA nur LONG, darunter nur SHORT. Verhindert, dass der Bot gegen den Trend handelt (z.B. eine Rallye shortet). Empfohlen AN.</div>
         <div class="field-row"><label data-i18n="lbl_cooldown">Cooldown pro Coin (Min., 0 = aus)</label><input type="number" id="sig-cooldown" placeholder="20" min="0" max="240"></div>
         <div class="settings-note" data-i18n="hint_cooldown">Nach dem Schliessen einer Position ist derselbe Coin so lange gesperrt. Stoppt staendiges Rein/Raus (Anti-Churn).</div>
+        <div class="field-row"><label data-i18n="lbl_trailing">Trailing-Stop</label><input type="checkbox" id="sig-trailing" style="width:auto"></div>
+        <div class="field-row"><label data-i18n="lbl_trail_mult">Trailing-Abstand (ATR-Faktor)</label><input type="number" id="sig-trail-mult" placeholder="2.0" min="0.3" max="10" step="0.1"></div>
+        <div class="settings-note" data-i18n="hint_trailing">Statt festem Take-Profit zieht der Stop mit dem Gewinn nach (Abstand = ATR × Faktor) und laesst Gewinner im Trend laufen. Kleiner = enger/sichert frueher, groesser = mehr Raum. Empfohlen AN.</div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('signal')">Verbindung testen</button>
           <span class="val-result" id="val-signal"></span>
@@ -4232,6 +4266,8 @@ const STRINGS = {
     hint_trend_gate:'Ueber der langen EMA nur LONG, darunter nur SHORT. Verhindert, dass der Bot gegen den Trend handelt (z.B. eine Rallye shortet). Empfohlen AN.',
     lbl_cooldown:'Cooldown pro Coin (Min., 0 = aus)',
     hint_cooldown:'Nach dem Schliessen einer Position ist derselbe Coin so lange gesperrt. Stoppt staendiges Rein/Raus (Anti-Churn).',
+    lbl_trailing:'Trailing-Stop', lbl_trail_mult:'Trailing-Abstand (ATR-Faktor)',
+    hint_trailing:'Statt festem Take-Profit zieht der Stop mit dem Gewinn nach (Abstand = ATR × Faktor) und laesst Gewinner im Trend laufen. Kleiner = enger/sichert frueher, groesser = mehr Raum. Empfohlen AN.',
     grid_oneway_warn:'<b>WICHTIG:</b> Bitget Sub-Account muss auf <b>One-Way Mode</b> stehen!<br>Bitget App: Futures-Handel -> Einstellungen -> Positionsmodus -> One-Way Mode.<br>Im Hedge-Modus oeffnet der Grid Bot ungewollt gegenlaeutige Positionen.',
     lbl_price_up:'Preis oben (0 = auto)', lbl_price_low:'Preis unten (0 = auto)', lbl_levels:'Anzahl Levels',
     lbl_min_funding:'Min. Funding Rate (%)', lbl_max_pos:'Max. Position (USDT)',
@@ -4391,6 +4427,8 @@ const STRINGS = {
     hint_trend_gate:'Above the long EMA only LONG, below only SHORT. Stops the bot from trading against the trend (e.g. shorting a rally). Recommended ON.',
     lbl_cooldown:'Cooldown per coin (min, 0 = off)',
     hint_cooldown:'After closing a position the same coin is locked for this long. Stops constant in/out (anti-churn).',
+    lbl_trailing:'Trailing stop', lbl_trail_mult:'Trailing distance (ATR factor)',
+    hint_trailing:'Instead of a fixed take-profit the stop trails the price (distance = ATR × factor), letting winners run in a trend. Smaller = tighter/locks earlier, larger = more room. Recommended ON.',
     grid_oneway_warn:'<b>IMPORTANT:</b> the Bitget sub-account must be set to <b>One-Way Mode</b>!<br>Bitget app: Futures trading -> Settings -> Position mode -> One-Way Mode.<br>In Hedge mode the Grid Bot unintentionally opens opposing positions.',
     lbl_price_up:'Upper price (0 = auto)', lbl_price_low:'Lower price (0 = auto)', lbl_levels:'Number of levels',
     lbl_min_funding:'Min funding rate (%)', lbl_max_pos:'Max position (USDT)',
@@ -6381,6 +6419,8 @@ function fillSettingsForm(state) {
     document.getElementById('sig-daily-limit').value = s(b.signal?.daily_loss_limit_pct||0);
     document.getElementById('sig-trend-gate').checked = (b.signal?.use_trend_gate !== false);
     document.getElementById('sig-cooldown').value = s(b.signal?.trade_cooldown_min ?? 20);
+    document.getElementById('sig-trailing').checked = (b.signal?.use_trailing !== false);
+    document.getElementById('sig-trail-mult').value = s(b.signal?.trail_atr_mult ?? 2.0);
     document.getElementById('grd-key').value   = s(b.grid?.api_key);
     document.getElementById('grd-sym').value   = s(b.grid?.symbol||'BTCUSDT');
     document.getElementById('grd-upper').value = s(b.grid?.upper_price||0);
@@ -6452,6 +6492,8 @@ async function saveSettings() {
         daily_loss_limit_pct: num('sig-daily-limit') || 0,
         use_trend_gate: document.getElementById('sig-trend-gate')?.checked ?? true,
         trade_cooldown_min: int('sig-cooldown'),
+        use_trailing: document.getElementById('sig-trailing')?.checked ?? true,
+        trail_atr_mult: num('sig-trail-mult') || 2.0,
       },
       grid: {
         api_key:     val('grd-key'),
