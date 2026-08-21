@@ -177,6 +177,8 @@ DEFAULT_CONFIG = {
             "use_macro": True, "use_trend": False, "trend_len": 50,
             "signal_threshold": 3, "check_interval": 30,
             "daily_loss_limit_pct": 0.0,  # Tages-Verlustlimit in % (0 = aus). >0 = pausiert bis zum naechsten UTC-Tag.
+            "use_trend_gate": True,       # harter Trend-Filter: ueber EMA nur Long, darunter nur Short
+            "trade_cooldown_min": 20,     # Sperre pro Coin nach dem Schliessen (Minuten, 0 = aus) - Anti-Churn
         },
         "grid": {
             "name": "Grid Bot", "enabled": False, "autostart": False,
@@ -1837,6 +1839,7 @@ def run_signal(flag):
     last_unreal  = 0.0   # unrealisierter PnL der offenen Signal-Positionen (vom letzten Zyklus)
     _day         = datetime.utcnow().strftime("%Y-%m-%d")  # aktueller UTC-Handelstag
     _day_anchor  = 0.0   # PnL zu Tagesbeginn (fuer das echte Tages-Verlustlimit)
+    cooldown_until = {}  # sym -> Zeitpunkt, ab dem wieder gehandelt werden darf (Anti-Churn)
 
     with plock:
         for t in tokens:
@@ -1893,6 +1896,8 @@ def run_signal(flag):
             use_macro=bc.get("use_macro",True);   use_trend=bc.get("use_trend",False)
             trend_len=max(20,int(bc.get("trend_len",50)))
             daily_limit = max(0.0, float(bc.get("daily_loss_limit_pct", 0))) / 100.0  # 0 = aus
+            use_trend_gate = bc.get("use_trend_gate", True)        # harter Trend-Filter
+            cooldown_min   = max(0, int(bc.get("trade_cooldown_min", 20)))  # Anti-Churn (Minuten)
             fkey            = _cfg.get("finnhub_key","")
 
             bal = client.balance(retries=3) or start_bal
@@ -1974,7 +1979,7 @@ def run_signal(flag):
                     sent     = news_sentiment(cur)
 
                     price_now = closes[-1]
-                    ema_long  = ema(closes, trend_len) if use_trend else 0.0
+                    ema_long  = ema(closes, trend_len) if (use_trend or use_trend_gate) else 0.0
                     adx_val   = adx(highs, lows, closes, 14)
                     ob_ratio  = None
                     if use_ob:
@@ -2006,6 +2011,14 @@ def run_signal(flag):
                         sc = int(sc * 0.5)
 
                     sig = "LONG" if sc >= thresh else "SHORT" if sc <= -thresh else "NEUTRAL"
+                    # Harter Trend-Filter: ueber der langen EMA nur LONG, darunter nur SHORT.
+                    # Gegen-Trend-Signal -> NEUTRAL (statt zu drehen -> trend-konforme Position
+                    # wird gehalten). Genau das stoppt das "Short in die Rallye"-Problem.
+                    sig_raw = sig
+                    if use_trend_gate and ema_long > 0:
+                        if sig == "LONG"  and price_now < ema_long: sig = "NEUTRAL"
+                        elif sig == "SHORT" and price_now > ema_long: sig = "NEUTRAL"
+                    _gate = " [Trend-Gate]" if sig != sig_raw else ""
                     with plock:
                         pstate["bots"]["signal"]["tokens"][sym].update({
                             "signal":sig,"score":sc,"rsi":round(rv,1),
@@ -2018,7 +2031,7 @@ def run_signal(flag):
                             "fear_greed":fg,"sentiment":sent,
                             "score_parts":{k:v for k,v in parts.items() if v != 0},
                         })
-                    blog("signal",f"{cur}: RSI={rv:.1f} ADX={adx_val:.0f} OB={ob_ratio if ob_ratio else '-'} BB={'low' if price_now<bb_l else 'high' if price_now>bb_u else 'mid'} Score={sc:+d} -> {sig}")
+                    blog("signal",f"{cur}: RSI={rv:.1f} ADX={adx_val:.0f} OB={ob_ratio if ob_ratio else '-'} BB={'low' if price_now<bb_l else 'high' if price_now>bb_u else 'mid'} Score={sc:+d} -> {sig}{_gate}")
 
                     pos = client.position(sym)
                     with plock:
@@ -2044,6 +2057,10 @@ def run_signal(flag):
 
                     def _open(direction):
                         nonlocal open_pos_count
+                        # Anti-Churn: nach dem Schliessen ist der Coin fuer cooldown_min Minuten
+                        # gesperrt - stoppt das staendige Rein/Raus auf demselben Coin.
+                        if cooldown_min > 0 and time.time() < cooldown_until.get(sym, 0):
+                            return
                         if open_pos_count >= max_conc:
                             blog("signal",f"{cur}: Max. Positionen ({max_conc}) erreicht – kein neuer Trade","WARN")
                             return
@@ -2115,6 +2132,7 @@ def run_signal(flag):
                                     "win_streak":win_streak, "loss_streak":loss_streak})
                             open_pos_count = max(0, open_pos_count - 1)
                             open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
+                            if cooldown_min > 0: cooldown_until[sym] = time.time() + cooldown_min*60
                             blog("signal",f"{cur}: Position gedreht","TRADE")
                             if not blackout: _open(sig)
                         else:
@@ -2145,6 +2163,7 @@ def run_signal(flag):
                                     "win_streak":win_streak, "loss_streak":loss_streak})
                             open_pos_count = max(0, open_pos_count - 1)
                             open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
+                            if cooldown_min > 0: cooldown_until[sym] = time.time() + cooldown_min*60
                         if sig in ("LONG","SHORT") and not blackout:
                             _open(sig)
                     with plock:
@@ -3898,6 +3917,10 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label data-i18n="lbl_sig_thresh">Signal-Schwelle (1-5)</label><input type="number" id="sig-thresh" placeholder="3" min="1" max="5"></div>
         <div class="field-row"><label data-i18n="lbl_daily_limit">Tages-Verlustlimit % (0 = aus)</label><input type="number" id="sig-daily-limit" placeholder="0" min="0" max="90" step="0.5"></div>
         <div class="settings-note" data-i18n="hint_daily_limit">Pausiert den Bot bis zum naechsten Tag (UTC), wenn der Tagesverlust diese % erreicht. 0 = aus (Bot laeuft durch). Fuer LIVE z.B. 5-10 empfohlen.</div>
+        <div class="field-row"><label data-i18n="lbl_trend_gate">Harter Trend-Filter (kein Gegen-Trend)</label><input type="checkbox" id="sig-trend-gate" style="width:auto"></div>
+        <div class="settings-note" data-i18n="hint_trend_gate">Ueber der langen EMA nur LONG, darunter nur SHORT. Verhindert, dass der Bot gegen den Trend handelt (z.B. eine Rallye shortet). Empfohlen AN.</div>
+        <div class="field-row"><label data-i18n="lbl_cooldown">Cooldown pro Coin (Min., 0 = aus)</label><input type="number" id="sig-cooldown" placeholder="20" min="0" max="240"></div>
+        <div class="settings-note" data-i18n="hint_cooldown">Nach dem Schliessen einer Position ist derselbe Coin so lange gesperrt. Stoppt staendiges Rein/Raus (Anti-Churn).</div>
         <div class="validate-row">
           <button class="btn-validate" onclick="validateKey('signal')">Verbindung testen</button>
           <span class="val-result" id="val-signal"></span>
@@ -4205,6 +4228,10 @@ const STRINGS = {
     lbl_sig_thresh:'Signal-Schwelle (1-5)',
     lbl_daily_limit:'Tages-Verlustlimit % (0 = aus)',
     hint_daily_limit:'Pausiert den Bot bis zum naechsten Tag (UTC), wenn der Tagesverlust diese % erreicht. 0 = aus (Bot laeuft durch). Fuer LIVE z.B. 5-10 empfohlen.',
+    lbl_trend_gate:'Harter Trend-Filter (kein Gegen-Trend)',
+    hint_trend_gate:'Ueber der langen EMA nur LONG, darunter nur SHORT. Verhindert, dass der Bot gegen den Trend handelt (z.B. eine Rallye shortet). Empfohlen AN.',
+    lbl_cooldown:'Cooldown pro Coin (Min., 0 = aus)',
+    hint_cooldown:'Nach dem Schliessen einer Position ist derselbe Coin so lange gesperrt. Stoppt staendiges Rein/Raus (Anti-Churn).',
     grid_oneway_warn:'<b>WICHTIG:</b> Bitget Sub-Account muss auf <b>One-Way Mode</b> stehen!<br>Bitget App: Futures-Handel -> Einstellungen -> Positionsmodus -> One-Way Mode.<br>Im Hedge-Modus oeffnet der Grid Bot ungewollt gegenlaeutige Positionen.',
     lbl_price_up:'Preis oben (0 = auto)', lbl_price_low:'Preis unten (0 = auto)', lbl_levels:'Anzahl Levels',
     lbl_min_funding:'Min. Funding Rate (%)', lbl_max_pos:'Max. Position (USDT)',
@@ -4360,6 +4387,10 @@ const STRINGS = {
     lbl_sig_thresh:'Signal threshold (1-5)',
     lbl_daily_limit:'Daily loss limit % (0 = off)',
     hint_daily_limit:'Pauses the bot until the next day (UTC) when the daily loss reaches this %. 0 = off (bot keeps trading). For LIVE e.g. 5-10 recommended.',
+    lbl_trend_gate:'Hard trend filter (no counter-trend)',
+    hint_trend_gate:'Above the long EMA only LONG, below only SHORT. Stops the bot from trading against the trend (e.g. shorting a rally). Recommended ON.',
+    lbl_cooldown:'Cooldown per coin (min, 0 = off)',
+    hint_cooldown:'After closing a position the same coin is locked for this long. Stops constant in/out (anti-churn).',
     grid_oneway_warn:'<b>IMPORTANT:</b> the Bitget sub-account must be set to <b>One-Way Mode</b>!<br>Bitget app: Futures trading -> Settings -> Position mode -> One-Way Mode.<br>In Hedge mode the Grid Bot unintentionally opens opposing positions.',
     lbl_price_up:'Upper price (0 = auto)', lbl_price_low:'Lower price (0 = auto)', lbl_levels:'Number of levels',
     lbl_min_funding:'Min funding rate (%)', lbl_max_pos:'Max position (USDT)',
@@ -6348,6 +6379,8 @@ function fillSettingsForm(state) {
     document.getElementById('sig-trend-len').value = s(sg.trend_len ?? 50);
     document.getElementById('sig-thresh').value = s(b.signal?.signal_threshold||3);
     document.getElementById('sig-daily-limit').value = s(b.signal?.daily_loss_limit_pct||0);
+    document.getElementById('sig-trend-gate').checked = (b.signal?.use_trend_gate !== false);
+    document.getElementById('sig-cooldown').value = s(b.signal?.trade_cooldown_min ?? 20);
     document.getElementById('grd-key').value   = s(b.grid?.api_key);
     document.getElementById('grd-sym').value   = s(b.grid?.symbol||'BTCUSDT');
     document.getElementById('grd-upper').value = s(b.grid?.upper_price||0);
@@ -6417,6 +6450,8 @@ async function saveSettings() {
         trend_len:   int('sig-trend-len') || 50,
         signal_threshold: int('sig-thresh')   || 3,
         daily_loss_limit_pct: num('sig-daily-limit') || 0,
+        use_trend_gate: document.getElementById('sig-trend-gate')?.checked ?? true,
+        trade_cooldown_min: int('sig-cooldown'),
       },
       grid: {
         api_key:     val('grd-key'),
