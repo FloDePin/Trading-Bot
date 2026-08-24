@@ -169,7 +169,7 @@ DEFAULT_CONFIG = {
             "atr_sl_mult": 1.5, "atr_tp_mult": 2.5,
             "max_concurrent": 2,
             "use_correlation_filter": True, "max_correlation": 0.85,
-            "use_adx_filter": True, "min_adx": 20,
+            "use_adx_filter": True, "min_adx": 20, "use_adx_gate": True,
             "use_orderbook_signal": True,
             "use_sltp_guard": True,
             "use_ema": True, "use_rsi": True, "use_macd": True, "use_bb": True,
@@ -1760,6 +1760,7 @@ def run_signal(flag):
             max_corr        = float(bc.get("max_correlation", 0.85))
             use_adx         = bc.get("use_adx_filter", True)
             min_adx         = float(bc.get("min_adx", 20))
+            use_adx_gate    = bc.get("use_adx_gate", True)   # hart sperren unter min_adx
             use_ob          = bc.get("use_orderbook_signal", True)
             use_sltp_guard  = bc.get("use_sltp_guard", True)
             use_ema=bc.get("use_ema",True);       use_rsi=bc.get("use_rsi",True)
@@ -1860,7 +1861,7 @@ def run_signal(flag):
                     # eingefrorene Kerzen ODER RSI am Anschlag -> Coin diesen Zyklus ueberspringen,
                     # damit NICHT auf kaputten Daten gehandelt wird. Gedrosselt warnen (10 min).
                     if (max(closes[-10:]) == min(closes[-10:])) or rv >= 99.9 or rv <= 0.1:
-                        if time.time() - degen_at.get(sym, 0) > 600:
+                        if time.time() - degen_at.get(sym, 0) > 1800:
                             degen_at[sym] = time.time()
                             blog("signal", f"{cur}: Kursdaten unbrauchbar (RSI={rv:.0f}, Preis {price_now}) - uebersprungen", "WARN")
                         continue
@@ -1904,7 +1905,11 @@ def run_signal(flag):
                     if use_trend_gate and ema_long > 0:
                         if sig == "LONG"  and price_now < ema_long: sig = "NEUTRAL"
                         elif sig == "SHORT" and price_now > ema_long: sig = "NEUTRAL"
-                    _gate = " [Trend-Gate]" if sig != sig_raw else ""
+                    # Harter ADX-Filter: nur bei echtem Trend handeln. Unter min_adx (schwacher
+                    # Trend / Seitwaerts) -> NEUTRAL. Vermeidet die teuren Chop-Fehlsignale.
+                    if use_adx_gate and 0 < adx_val < min_adx and sig != "NEUTRAL":
+                        sig = "NEUTRAL"
+                    _gate = " [Gate]" if sig != sig_raw else ""
                     with plock:
                         pstate["bots"]["signal"]["tokens"][sym].update({
                             "signal":sig,"score":sc,"rsi":round(rv,1),
@@ -3707,8 +3712,12 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label>API Secret</label><input type="password" id="sig-sec" placeholder="Bitget API Secret"></div>
         <div class="field-row"><label>Passphrase</label><input type="password" id="sig-pass" placeholder="Bitget Passphrase"></div>
         <div class="field-row"><label data-i18n="lbl_autostart">Auto-Start nach Neustart</label><input type="checkbox" id="sig-autostart" style="width:auto"></div>
+        <div class="field-row"><label data-i18n="lbl_coins">Coins (kommagetrennt)</label><input type="text" id="sig-tokens" placeholder="SOLUSDT, ETHUSDT, DOGEUSDT"></div>
+        <div class="settings-note" data-i18n="hint_coins">Welche Coins der Signal-Bot handelt. Kaputte Demo-Coins (z.B. XRP) einfach weglassen. Änderung greift beim nächsten Bot-Start.</div>
         <div class="field-row"><label>Leverage (1-10)</label><input type="number" id="sig-lever" placeholder="3" min="1" max="10"></div>
         <div class="field-row"><label data-i18n="lbl_risk_trade">Risiko pro Trade (%)</label><input type="number" id="sig-risk-pct" placeholder="3.0" step="0.5" min="0.5" max="10"></div>
+        <div class="field-row"><label data-i18n="lbl_sl_mult">Stop-Loss Weite (ATR-Faktor)</label><input type="number" id="sig-sl-mult" placeholder="1.5" step="0.1" min="0.5" max="6"></div>
+        <div class="settings-note" data-i18n="hint_sl_mult">Abstand des Einstiegs-Stops = ATR × Faktor. Größer = mehr Luft, weniger Whipsaw-Ausstopper im Rauschen (dafür größerer Verlust je Fehltrade). 1,5 = eng, 2,5–3 = geduldig.</div>
         <div class="field-row"><label data-i18n="lbl_usdt_trade">USDT pro Trade (fallback)</label><input type="number" id="sig-usdt" placeholder="30" min="5"></div>
         <div class="field-row"><label data-i18n="lbl_budget">Budget (USDT)</label><input type="number" id="sig-budget" placeholder="0 = kein Limit" min="0" title="Max. Margin, die dieser Bot binden darf. 0 = kein Limit (volle Balance)."></div>
         <div class="field-row"><label data-i18n="lbl_max_conc">Max. gleichzeitige Pos.</label><input type="number" id="sig-max-conc" placeholder="2" min="1" max="4"></div>
@@ -3718,6 +3727,8 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label data-i18n="lbl_adx_filter">ADX-Trendfilter</label><input type="checkbox" id="sig-adx-filter" style="width:auto"></div>
         <div class="field-row"><label data-i18n="lbl_min_adx">Min. ADX (10-40)</label><input type="number" id="sig-min-adx" placeholder="20" step="1" min="10" max="40"></div>
         <div class="settings-note" data-i18n="note_adx">ADX-Trendfilter: daempft das Signal, wenn kein klarer Trend da ist (ADX unter Schwelle) – handelt weniger im Seitwaerts-Gezappel. Fail-open bei zu wenig Daten.</div>
+        <div class="field-row"><label data-i18n="lbl_adx_gate">ADX-Hart-Filter (nur bei Trend)</label><input type="checkbox" id="sig-adx-gate" style="width:auto"></div>
+        <div class="settings-note" data-i18n="note_adx_gate">Härter als der Dämpfer: unter Min. ADX wird gar nicht gehandelt (Signal → NEUTRAL). Vermeidet die teuren Fehlsignale im Seitwaerts-Markt. Empfohlen AN (Min. ADX z.B. 25).</div>
         <div class="field-row"><label data-i18n="lbl_ob">Order-Book-Kaufdruck</label><input type="checkbox" id="sig-ob-signal" style="width:auto"></div>
         <div class="settings-note" data-i18n="note_ob">Order-Book-Kaufdruck: bezieht den Kauf-/Verkaufsdruck aus dem Live-Orderbuch als zusaetzlichen Signal-Faktor mit ein. Fail-open, wenn keine Daten verfuegbar sind.</div>
         <div class="field-row" style="grid-template-columns:1fr;align-items:start">
@@ -4048,6 +4059,12 @@ const STRINGS = {
     note_corr:'Korrelations-Filter: verhindert, dass der Bot eine neue Position eroeffnet, die zu stark mit einer bereits offenen, gleichgerichteten Position korreliert (Diversifikation). Bei fehlenden Daten wird normal weitergehandelt.',
     lbl_adx_filter:'ADX-Trendfilter', lbl_min_adx:'Min. ADX (10-40)',
     note_adx:'ADX-Trendfilter: daempft das Signal, wenn kein klarer Trend da ist (ADX unter Schwelle) – handelt weniger im Seitwaerts-Gezappel. Fail-open bei zu wenig Daten.',
+    lbl_adx_gate:'ADX-Hart-Filter (nur bei Trend)',
+    note_adx_gate:'Härter als der Dämpfer: unter Min. ADX wird gar nicht gehandelt (Signal → NEUTRAL). Vermeidet teure Fehlsignale im Seitwaerts-Markt. Empfohlen AN (Min. ADX z.B. 25).',
+    lbl_sl_mult:'Stop-Loss Weite (ATR-Faktor)',
+    hint_sl_mult:'Abstand des Einstiegs-Stops = ATR × Faktor. Größer = mehr Luft, weniger Whipsaw (dafür größerer Verlust je Fehltrade). 1,5 = eng, 2,5–3 = geduldig.',
+    lbl_coins:'Coins (kommagetrennt)',
+    hint_coins:'Welche Coins der Signal-Bot handelt. Kaputte Demo-Coins (z.B. XRP) einfach weglassen. Änderung greift beim nächsten Bot-Start.',
     lbl_ob:'Order-Book-Kaufdruck',
     note_ob:'Order-Book-Kaufdruck: bezieht den Kauf-/Verkaufsdruck aus dem Live-Orderbuch als zusaetzlichen Signal-Faktor mit ein. Fail-open, wenn keine Daten verfuegbar sind.',
     lbl_factors:'Score-Faktoren (an/aus)',
@@ -4210,6 +4227,12 @@ const STRINGS = {
     note_corr:'Correlation filter: prevents the bot from opening a new position that is too strongly correlated with an already-open one in the same direction (diversification). When data is missing it keeps trading as normal.',
     lbl_adx_filter:'ADX trend filter', lbl_min_adx:'Min ADX (10-40)',
     note_adx:'ADX trend filter: dampens the signal when there is no clear trend (ADX below threshold) – trades less in sideways chop. Fail-open when there is too little data.',
+    lbl_adx_gate:'ADX hard filter (trend only)',
+    note_adx_gate:'Harder than the dampener: below Min ADX it does not trade at all (signal → NEUTRAL). Avoids costly fake-outs in sideways markets. Recommended ON (Min ADX e.g. 25).',
+    lbl_sl_mult:'Stop-loss width (ATR factor)',
+    hint_sl_mult:'Entry stop distance = ATR × factor. Larger = more room, less whipsaw (but bigger loss per bad trade). 1.5 = tight, 2.5–3 = patient.',
+    lbl_coins:'Coins (comma-separated)',
+    hint_coins:'Which coins the Signal bot trades. Just drop broken demo coins (e.g. XRP). Change takes effect on the next bot start.',
     lbl_ob:'Order-book buy pressure',
     note_ob:'Order-book buy pressure: includes buy/sell pressure from the live order book as an extra signal factor. Fail-open when no data is available.',
     lbl_factors:'Score factors (on/off)',
@@ -6044,6 +6067,9 @@ function fillSettingsForm(state) {
     document.getElementById('sig-max-corr').value    = s(b.signal?.max_correlation ?? 0.85);
     document.getElementById('sig-adx-filter').checked = (b.signal?.use_adx_filter !== false);
     document.getElementById('sig-min-adx').value     = s(b.signal?.min_adx ?? 20);
+    document.getElementById('sig-adx-gate').checked  = (b.signal?.use_adx_gate !== false);
+    document.getElementById('sig-sl-mult').value     = s(b.signal?.atr_sl_mult ?? 1.5);
+    document.getElementById('sig-tokens').value      = (b.signal?.tokens || []).join(', ');
     document.getElementById('sig-ob-signal').checked = (b.signal?.use_orderbook_signal !== false);
     const sf = k => document.getElementById('sig-f-'+k); const sg = b.signal||{};
     sf('ema').checked=(sg.use_ema!==false); sf('rsi').checked=(sg.use_rsi!==false);
@@ -6104,8 +6130,10 @@ async function saveSettings() {
         api_secret:       val('sig-sec'),
         passphrase:       val('sig-pass'),
         autostart:        document.getElementById('sig-autostart')?.checked || false,
+        tokens:           val('sig-tokens').split(',').map(t=>t.trim().toUpperCase()).filter(Boolean).map(t=>t.endsWith('USDT')?t:t+'USDT'),
         leverage:         int('sig-lever')    || 3,
         risk_pct:         num('sig-risk-pct') || 3.0,
+        atr_sl_mult:      num('sig-sl-mult') || 1.5,
         use_risk_pct:     true,
         usdt_per_trade:   num('sig-usdt')     || 30,
         budget_usdt:      num('sig-budget'),
@@ -6114,6 +6142,7 @@ async function saveSettings() {
         max_correlation:  num('sig-max-corr') || 0.85,
         use_adx_filter:   document.getElementById('sig-adx-filter')?.checked ?? true,
         min_adx:          int('sig-min-adx') || 20,
+        use_adx_gate:     document.getElementById('sig-adx-gate')?.checked ?? true,
         use_orderbook_signal: document.getElementById('sig-ob-signal')?.checked ?? true,
         use_ema:     document.getElementById('sig-f-ema')?.checked ?? true,
         use_rsi:     document.getElementById('sig-f-rsi')?.checked ?? true,
@@ -6523,6 +6552,8 @@ class Handler(BaseHTTPRequestHandler):
                     # loeschen. So muss man beim Update nicht alles neu eintippen.
                     if k in ("api_key", "api_secret", "passphrase") and not v:
                         continue
+                    if k == "tokens" and (not isinstance(v, list) or not v):
+                        continue   # leere Coins-Liste nicht speichern -> gesetzte behalten
                     cfg["bots"][bid][k] = v
             save_config(cfg)
             _macro_cache["ts"] = 0
