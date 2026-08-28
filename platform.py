@@ -2005,8 +2005,8 @@ def run_signal(flag):
                             trail[sym] = {"side": direction, "peak": px, "stop": sl}  # Trailing-Start am Einstiegs-SL
                             with plock:
                                 pstate["bots"]["signal"]["trade_count"] += 1
-                            _tp_s = f"{tp:.2f}" if tp is not None else "Trailing"
-                            blog("signal",f"{cur}: {direction} @ {px:.2f} | SL={sl:.2f} TP={_tp_s} ({this_trade:.0f} USDT)","TRADE")
+                            _tp_s = fmt_p(sym, tp) if tp is not None else "Trailing"
+                            blog("signal",f"{cur}: {direction} @ {fmt_p(sym, px)} | SL={fmt_p(sym, sl)} TP={_tp_s} (Einsatz: {this_trade:.0f} USDT)","TRADE")
                             # SL/TP-Waechter: sicherstellen dass die Position wirklich geschuetzt ist
                             if use_sltp_guard:
                                 _ensure_sltp(client, sym, direction, sl, tp, qs)
@@ -2306,7 +2306,7 @@ def run_grid(flag):
             elif current_idx < n and px >= levels[current_idx + 1]:
                 current_idx += 1
                 if net_qty <= 0 or not held:
-                    blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx+1}/{n}] uebersprungen - kein Bestand","WARN")
+                    blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx}/{n}] uebersprungen - kein Bestand","WARN")
                 else:
                     qty_trade = min(qty_lvl, net_qty)
                     qss = fmt_q(sym, qty_trade)
@@ -2341,9 +2341,9 @@ def run_grid(flag):
                         net_qty = 0.0; held = []; _persist_grid()
                         blog("grid","Bestand auf 0 synchronisiert (Konto hat keine Position)","WARN")
                     elif resp:
-                        blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx+1}/{n}] Fehler {resp.get('msg','')}","ERROR")
+                        blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx}/{n}] Fehler {resp.get('msg','')}","ERROR")
                     if ok:
-                        blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx+1}/{n}] ✓","TRADE")
+                        blog("grid",f"Grid SELL @ {levels[current_idx]:.2f} [Level {current_idx}/{n}] ✓","TRADE")
 
             bal = client.balance(retries=2) or start_bal
             with plock:
@@ -2533,7 +2533,7 @@ def run_grid_instance(flag, inst_cfg, inst_id):
             elif current_idx < n and px >= levels[current_idx + 1]:
                 current_idx += 1
                 if net_qty <= 0 or not held:
-                    _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx+1}/{n} uebersprungen - kein Bestand","WARN")
+                    _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx}/{n} uebersprungen - kein Bestand","WARN")
                 else:
                     qty_trade = min(qty_l, net_qty)
                     qss = fmt_q(sym, qty_trade)
@@ -2561,12 +2561,12 @@ def run_grid_instance(flag, inst_cfg, inst_id):
                                           round(net_pnl,4), fee=round(fee_amt,6), size=qty_trade)
                         except Exception as _e:
                             _ilog(inst_id, name, f"Trade-DB-Eintrag fehlgeschlagen: {_e}", "WARN")
-                        _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx+1}/{n} OK","TRADE")
+                        _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx}/{n} OK","TRADE")
                     elif resp and "no position" in str(resp.get("msg","")).lower():
                         net_qty = 0.0; held = []; _persist_grid()
                         _ilog(inst_id, name, "Bestand auf 0 synchronisiert (Konto hat keine Position)","WARN")
                     else:
-                        _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx+1}/{n} Fehler {resp.get('msg','')}","ERROR")
+                        _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx}/{n} Fehler {resp.get('msg','')}","ERROR")
 
             bal = client.balance(retries=2) or start_bal
             with plock:
