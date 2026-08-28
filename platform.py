@@ -2172,6 +2172,19 @@ def run_grid(flag):
         except Exception as e:
             blog("grid", f"Hebel setzen fehlgeschlagen ({e}) - Konto-Hebel bleibt", "WARN")
     cur_price = client.price(sym)
+    # Auf gueltige Preisdaten warten, BEVOR das Raster berechnet wird: ein API-Timeout beim
+    # Start (cur_price=0) wuerde sonst zusammen mit fehlgeschlagener Auto-Range zu upper/lower=0
+    # und damit zu einer Division durch 0 in qty_lvl fuehren -> Thread stirbt lautlos beim Setup.
+    _waited = 0
+    while cur_price <= 0 and not flag["stop"] and _waited < 120:
+        blog("grid", f"Warte auf Preisdaten fuer {sym}...", "WARN")
+        time.sleep(5); _waited += 5
+        cur_price = client.price(sym)
+    if cur_price <= 0:
+        blog("grid", f"Keine Preisdaten fuer {sym} - Grid-Start abgebrochen", "ERROR")
+        with plock:
+            pstate["bots"]["grid"].update({"status": "STOPPED", "started_at": 0})
+        return
 
     if upper == 0 or lower == 0 or upper <= lower:
         if step_size > 0 and cur_price > 0:
@@ -2307,11 +2320,21 @@ def run_grid(flag):
                     if ok:
                         # Schaetzung: Level-Abstand minus geschaetzte Round-Trip-Gebuehren.
                         # (Kein echter Fill-Preis -> Slippage nicht beruecksichtigt, s. Doku.)
-                        pnl += qty_trade * step - qty_trade * px * fee_rate * 2
+                        fee_amt = qty_trade * px * fee_rate * 2
+                        net_pnl = qty_trade * step - fee_amt
+                        pnl += net_pnl
                         net_qty = max(0.0, net_qty - qty_trade)
                         if held: held.pop()
                         trades += 1
                         _persist_grid()
+                        # Grid-Trade in die DB (wie Signal/DCA) -> erscheint im Trades-Tab.
+                        # entry = Level eine Stufe darunter (vereinfachtes 1-Stufen-PnL-Modell).
+                        try:
+                            db_save_trade("grid", sym.replace("USDT",""), "LONG",
+                                          round(levels[current_idx-1],4), round(px,4),
+                                          round(net_pnl,4), fee=round(fee_amt,6), size=qty_trade)
+                        except Exception as _e:
+                            blog("grid", f"Trade-DB-Eintrag fehlgeschlagen: {_e}", "WARN")
                     elif resp and "no position" in str(resp.get("msg","")).lower():
                         # Konto hat keine Position -> lokale Buchhaltung war stale (z.B. nach manuellem
                         # "Close all"). Auf 0 syncen, damit der Grid nicht weiter Phantom-Bestand verkauft.
@@ -2385,6 +2408,18 @@ def run_grid_instance(flag, inst_cfg, inst_id):
         except Exception as e:
             _ilog(inst_id, name, f"Hebel setzen fehlgeschlagen ({e}) - Konto-Hebel bleibt", "WARN")
     cur_price = client.price(sym)
+    # Auf gueltige Preisdaten warten (s. run_grid): verhindert Division durch 0 in qty_l,
+    # falls die API beim Start einen Timeout hat (cur_price=0 + fehlgeschlagene Auto-Range).
+    _waited = 0
+    while cur_price <= 0 and not flag["stop"] and _waited < 120:
+        _ilog(inst_id, name, f"Warte auf Preisdaten fuer {sym}...", "WARN")
+        time.sleep(5); _waited += 5
+        cur_price = client.price(sym)
+    if cur_price <= 0:
+        _ilog(inst_id, name, f"Keine Preisdaten fuer {sym} - Start abgebrochen", "ERROR")
+        with plock:
+            pstate["grid_instances"].get(inst_id,{}).update({"status": "STOPPED", "started_at": 0})
+        return
 
     if upper == 0 or lower == 0 or upper <= lower:
         if step_size > 0 and cur_price > 0:
@@ -2512,11 +2547,20 @@ def run_grid_instance(flag, inst_cfg, inst_id):
                     if ok:
                         # Schaetzung: Level-Abstand minus geschaetzte Round-Trip-Gebuehren.
                         # (Kein echter Fill-Preis -> Slippage nicht beruecksichtigt, s. Doku.)
-                        pnl += qty_trade * step - qty_trade * px * fee_rate * 2
+                        fee_amt = qty_trade * px * fee_rate * 2
+                        net_pnl = qty_trade * step - fee_amt
+                        pnl += net_pnl
                         net_qty = max(0.0, net_qty - qty_trade)
                         if held: held.pop()
                         trades += 1
                         _persist_grid()
+                        # Grid-Trade dieser Instanz in die DB -> erscheint im Trades-Tab (Label = Name).
+                        try:
+                            db_save_trade(name, sym.replace("USDT",""), "LONG",
+                                          round(levels[current_idx-1],4), round(px,4),
+                                          round(net_pnl,4), fee=round(fee_amt,6), size=qty_trade)
+                        except Exception as _e:
+                            _ilog(inst_id, name, f"Trade-DB-Eintrag fehlgeschlagen: {_e}", "WARN")
                         _ilog(inst_id, name, f"Grid SELL @ {levels[current_idx]:.2f} L{current_idx+1}/{n} OK","TRADE")
                     elif resp and "no position" in str(resp.get("msg","")).lower():
                         net_qty = 0.0; held = []; _persist_grid()
@@ -5923,6 +5967,16 @@ function update(state) {
       </span>
     </div>`;
   });
+  // Multi-Grid-Instanzen mitzaehlen - sonst fehlen ihre Profite/Trades in den Overview-Kacheln.
+  let instCount = 0;
+  if (state.grid_instances) {
+    Object.values(state.grid_instances).forEach(inst => {
+      instCount++;
+      totalPnl    += parseFloat(inst.pnl || 0);
+      totalTrades += parseInt(inst.trade_count || 0);
+      if ((inst.status||'') === 'RUNNING') activeCount++;
+    });
+  }
   document.getElementById('ov-rows').innerHTML = rows.join('');
   const pnlEl = document.getElementById('ov-pnl');
   pnlEl.textContent = (totalPnl>=0?'+':'')+totalPnl.toFixed(2);
@@ -5933,7 +5987,7 @@ function update(state) {
   document.getElementById('ov-balance').textContent =
     (state.total_balance != null ? state.total_balance : totalBal).toFixed(2);
   document.getElementById('ov-pnlpct').textContent = state.bots.signal?.pnl_pct?.toFixed(2)+'%' || '-';
-  document.getElementById('ov-active').textContent = activeCount + ' / 3';
+  document.getElementById('ov-active').textContent = activeCount + ' / ' + (3 + instCount);
   document.getElementById('ov-trades').textContent = totalTrades;
 
   // Overview macro (from signal bot)
