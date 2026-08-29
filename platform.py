@@ -179,6 +179,7 @@ DEFAULT_CONFIG = {
             "daily_loss_limit_pct": 0.0,  # Tages-Verlustlimit in % (0 = aus). >0 = pausiert bis zum naechsten UTC-Tag.
             "use_trend_gate": True,       # harter Trend-Filter: ueber EMA nur Long, darunter nur Short
             "use_htf_trend": True,        # Trend-EMA auf dem 1h-Zeitrahmen (statt 1m-Rauschen)
+            "use_htf_adx": True,          # ADX-Regime-Gate auf dem 1h-Zeitrahmen (statt 1m-Rauschen)
             "trade_cooldown_min": 20,     # Sperre pro Coin nach dem Schliessen (Minuten, 0 = aus) - Anti-Churn
             "use_trailing": True,         # Trailing-Stop: Stop zieht mit dem Gewinn nach (statt festem TP)
             "trail_atr_mult": 2.0,        # Trailing-Abstand = ATR * dieser Faktor
@@ -1127,7 +1128,7 @@ def fetch_orderbook_pressure(symbol, band=0.01):
 
 _ob_cache = {}                              # (versehentlich beim Tab-Ausbau geloescht, wieder da)
 _trades_cache = {"data": [], "ts": 0}       # Cache fuer /api/trades
-_htf_trend_cache = {}                       # sym -> (ema_wert, ts, period) fuer den 1h-Trend-Filter
+_htf_trend_cache = {}                       # sym -> (ema_1h, adx_1h, ts, ema_period) fuer 1h-Trend+Regime
 
 def fetch_all_trades(limit=100):
     if time.time() - _trades_cache["ts"] < 60:
@@ -1775,6 +1776,7 @@ def run_signal(flag):
             daily_limit = max(0.0, float(bc.get("daily_loss_limit_pct", 0))) / 100.0  # 0 = aus
             use_trend_gate = bc.get("use_trend_gate", True)        # harter Trend-Filter
             use_htf_trend  = bc.get("use_htf_trend", True)         # Trend-EMA auf 1h-Zeitrahmen
+            use_htf_adx    = bc.get("use_htf_adx", True)           # ADX-Regime-Gate auf 1h-Zeitrahmen
             cooldown_min   = max(0, int(bc.get("trade_cooldown_min", 20)))  # Anti-Churn (Minuten)
             use_trailing   = bc.get("use_trailing", True)          # Trailing-Stop
             trail_mult     = max(0.3, float(bc.get("trail_atr_mult", 2.0)))  # Trailing-Abstand in ATR
@@ -1868,13 +1870,20 @@ def run_signal(flag):
                             degen_at[sym] = time.time()
                             blog("signal", f"{cur}: Kursdaten unbrauchbar (RSI={rv:.0f}, Preis {price_now}) - uebersprungen", "WARN")
                         continue
-                    # Trend-EMA: 1h-Zeitrahmen (robust, spiegelt den echten Trend) wenn use_htf_trend,
-                    # sonst wie frueher auf den 1m-Kerzen. trend_len ist dann die Periode in Stunden.
+                    adx_1m = adx(highs, lows, closes, 14)
+                    # 1h-Zeitrahmen: Trend-EMA + Regime-ADX aus EINEM gecachten Kerzen-Abruf.
+                    # trend_len ist bei use_htf_trend die EMA-Periode in Stunden.
+                    need_htf = (use_htf_trend and (use_trend or use_trend_gate)) or use_htf_adx
+                    ema_1h = adx_1h = 0.0
+                    if need_htf:
+                        ema_1h, adx_1h = htf_metrics(client, sym, trend_len)
                     if use_trend or use_trend_gate:
-                        ema_long = htf_trend_ema(client, sym, trend_len) if use_htf_trend else ema(closes, trend_len)
+                        ema_long = ema_1h if use_htf_trend else ema(closes, trend_len)
                     else:
                         ema_long = 0.0
-                    adx_val   = adx(highs, lows, closes, 14)
+                    # ADX fuer Daempfer + Hart-Gate: 1h-Regime (glatt) statt 1m-Rauschen, wenn aktiv.
+                    # Fail-open bleibt (adx_val==0 -> Filter greifen nicht).
+                    adx_val = adx_1h if use_htf_adx else adx_1m
                     ob_ratio  = None
                     if use_ob:
                         ob = fetch_orderbook_pressure(sym)
@@ -2104,25 +2113,34 @@ def run_signal(flag):
 # ─────────────────────────────────────────────
 #  GRID BOT
 # ─────────────────────────────────────────────
-def htf_trend_ema(client, sym, period):
-    """Trend-EMA auf dem 1h-Zeitrahmen statt auf 1-Minuten-Rauschen.
-    Die 1m-EMA kippt bei jedem Mini-Dip und erlaubt so Gegen-Trend-Trades
-    (z.B. Short mitten in einer Rallye). Die 1h-EMA spiegelt den ECHTEN Trend:
-    solange der 1h-Trend steigt, laesst der Trend-Gate nur Longs zu.
-    Pro Coin ~20 min gecacht (ein 1h-Trend aendert sich nicht in Sekunden) ->
-    keine 1h-Kerzen-Abfrage in jedem Zyklus. Fail-safe: bei Fehler alten Wert
-    behalten, sonst 0.0 (Gate faellt dann auf 'kein Filter' zurueck)."""
-    period = max(5, int(period))
+def htf_metrics(client, sym, ema_period):
+    """1h-Zeitrahmen-Kennzahlen aus EINEM Kerzen-Abruf: Trend-EMA (Periode = ema_period,
+    in Stunden) UND ADX(14) als Regime-Mass. Beide teilen sich denselben 1h-Fetch, pro
+    Coin ~20 min gecacht -> keine zusaetzliche API-Last, ein Abruf bedient beide Gates.
+
+    Warum 1h: die 1m-EMA kippt bei jedem Mini-Dip (Gegen-Trend-Trades), der 1m-ADX
+    springt im Chop kurz ueber die Schwelle (Fehl-Trades). Auf 1h-Kerzen messen beide
+    das ECHTE Makro-Momentum. Fail-safe: bei Fehler alte Werte behalten, sonst 0.0
+    (die Gates fallen dann fail-open auf 'kein Filter' zurueck).
+    Gibt (ema_1h, adx_1h) zurueck."""
+    ema_period = max(5, int(ema_period))
     c = _htf_trend_cache.get(sym)
-    if c and c[2] == period and time.time() - c[1] < 1200:
-        return c[0]
+    if c and c[3] == ema_period and time.time() - c[2] < 1200:
+        return c[0], c[1]
     try:
-        _o, _h, _l, closes_1h, _v = client.klines(sym, limit=max(period + 5, 60), granularity="1H")
-        val = ema(closes_1h, period) if len(closes_1h) >= 5 else (c[0] if c else 0.0)
+        # highs/lows/closes ALLE speichern - adx() braucht zwingend alle drei.
+        _o, highs_1h, lows_1h, closes_1h, _v = client.klines(sym, limit=max(ema_period + 5, 60), granularity="1H")
+        if len(closes_1h) >= 5:
+            ema_val = ema(closes_1h, ema_period)
+            adx_val = adx(highs_1h, lows_1h, closes_1h, 14) if len(closes_1h) >= 20 else (c[1] if c else 0.0)
+        else:
+            ema_val = c[0] if c else 0.0
+            adx_val = c[1] if c else 0.0
     except Exception:
-        val = c[0] if c else 0.0
-    _htf_trend_cache[sym] = (val, time.time(), period)
-    return val
+        ema_val = c[0] if c else 0.0
+        adx_val = c[1] if c else 0.0
+    _htf_trend_cache[sym] = (ema_val, adx_val, time.time(), ema_period)
+    return ema_val, adx_val
 
 def grid_smart_range(client, sym, hours, cur_price):
     """Smart-Range: leitet die Grid-Range aus dem echten Hoch/Tief der letzten `hours`
@@ -3829,6 +3847,8 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="settings-note" data-i18n="hint_trend_gate">Ueber der langen EMA nur LONG, darunter nur SHORT. Verhindert, dass der Bot gegen den Trend handelt (z.B. eine Rallye shortet). Empfohlen AN.</div>
         <div class="field-row"><label data-i18n="lbl_htf_trend">Trend auf 1h-Zeitrahmen</label><input type="checkbox" id="sig-htf-trend" style="width:auto"></div>
         <div class="settings-note" data-i18n="hint_htf_trend">Berechnet die Trend-EMA auf 1-Stunden-Kerzen statt auf 1-Minuten-Rauschen. So spiegelt der Filter den ECHTEN Trend: kurze Dips drehen ihn nicht mehr, keine Gegen-Trend-Shorts in einer Rallye. Bei AN gilt die "Trend-EMA Laenge" in STUNDEN (z.B. 24 = 1-Tages-Trend, 50 = ~2 Tage). Empfohlen AN.</div>
+        <div class="field-row"><label data-i18n="lbl_htf_adx">ADX-Regime auf 1h-Zeitrahmen</label><input type="checkbox" id="sig-htf-adx" style="width:auto"></div>
+        <div class="settings-note" data-i18n="hint_htf_adx">Berechnet den ADX (Regime-Mass) auf 1-Stunden-Kerzen statt 1m. Der 1m-ADX springt im Chop kurz ueber die Schwelle und lockt Fehl-Trades an; der 1h-ADX misst das ECHTE Makro-Momentum. Effekt: der Signal-Bot handelt NUR bei echtem Trend (1h-ADX >= Min. ADX) und steht im Seitwaerts-Chop still - dort verdient stattdessen der Grid. Nutzt denselben "Min. ADX"-Wert. Idle im Chop ist gewollt (schuetzt Kapital). Empfohlen AN.</div>
         <div class="field-row"><label data-i18n="lbl_cooldown">Cooldown pro Coin (Min., 0 = aus)</label><input type="number" id="sig-cooldown" placeholder="20" min="0" max="240"></div>
         <div class="settings-note" data-i18n="hint_cooldown">Nach dem Schliessen einer Position ist derselbe Coin so lange gesperrt. Stoppt staendiges Rein/Raus (Anti-Churn).</div>
         <div class="field-row"><label data-i18n="lbl_trailing">Trailing-Stop</label><input type="checkbox" id="sig-trailing" style="width:auto"></div>
@@ -4151,6 +4171,7 @@ const STRINGS = {
     lbl_trend_gate:'Harter Trend-Filter (kein Gegen-Trend)',
     hint_trend_gate:'Ueber der langen EMA nur LONG, darunter nur SHORT. Verhindert, dass der Bot gegen den Trend handelt (z.B. eine Rallye shortet). Empfohlen AN.',
     lbl_htf_trend:'Trend auf 1h-Zeitrahmen', hint_htf_trend:'Berechnet die Trend-EMA auf 1-Stunden-Kerzen statt auf 1-Minuten-Rauschen. So spiegelt der Filter den ECHTEN Trend: kurze Dips drehen ihn nicht mehr, keine Gegen-Trend-Shorts in einer Rallye. Bei AN gilt die "Trend-EMA Laenge" in STUNDEN (z.B. 24 = 1-Tages-Trend, 50 = ~2 Tage). Empfohlen AN.',
+    lbl_htf_adx:'ADX-Regime auf 1h-Zeitrahmen', hint_htf_adx:'Berechnet den ADX (Regime-Mass) auf 1-Stunden-Kerzen statt 1m. Der 1m-ADX springt im Chop kurz ueber die Schwelle und lockt Fehl-Trades an; der 1h-ADX misst das ECHTE Makro-Momentum. Effekt: der Signal-Bot handelt NUR bei echtem Trend (1h-ADX >= Min. ADX) und steht im Seitwaerts-Chop still - dort verdient stattdessen der Grid. Nutzt denselben "Min. ADX"-Wert. Idle im Chop ist gewollt (schuetzt Kapital). Empfohlen AN.',
     lbl_cooldown:'Cooldown pro Coin (Min., 0 = aus)',
     hint_cooldown:'Nach dem Schliessen einer Position ist derselbe Coin so lange gesperrt. Stoppt staendiges Rein/Raus (Anti-Churn).',
     lbl_trailing:'Trailing-Stop', lbl_trail_mult:'Trailing-Abstand (ATR-Faktor)',
@@ -4320,6 +4341,7 @@ const STRINGS = {
     lbl_trend_gate:'Hard trend filter (no counter-trend)',
     hint_trend_gate:'Above the long EMA only LONG, below only SHORT. Stops the bot from trading against the trend (e.g. shorting a rally). Recommended ON.',
     lbl_htf_trend:'Trend on 1h timeframe', hint_htf_trend:'Computes the trend EMA on 1-hour candles instead of 1-minute noise. The filter then reflects the REAL trend: short dips no longer flip it, no counter-trend shorts in a rally. When ON, "Trend EMA length" is in HOURS (e.g. 24 = 1-day trend, 50 = ~2 days). Recommended ON.',
+    lbl_htf_adx:'ADX regime on 1h timeframe', hint_htf_adx:'Computes ADX (the regime measure) on 1-hour candles instead of 1m. The 1m ADX briefly spikes above the threshold in chop and lures bad trades; the 1h ADX measures the REAL macro momentum. Effect: the signal bot trades ONLY in a genuine trend (1h ADX >= Min ADX) and stays idle in sideways chop - where the grid earns instead. Uses the same "Min ADX" value. Being idle in chop is intended (protects capital). Recommended ON.',
     lbl_cooldown:'Cooldown per coin (min, 0 = off)',
     hint_cooldown:'After closing a position the same coin is locked for this long. Stops constant in/out (anti-churn).',
     lbl_trailing:'Trailing stop', lbl_trail_mult:'Trailing distance (ATR factor)',
@@ -6169,6 +6191,7 @@ function fillSettingsForm(state) {
     document.getElementById('sig-daily-limit').value = s(b.signal?.daily_loss_limit_pct||0);
     document.getElementById('sig-trend-gate').checked = (b.signal?.use_trend_gate !== false);
     document.getElementById('sig-htf-trend').checked = (b.signal?.use_htf_trend !== false);
+    document.getElementById('sig-htf-adx').checked = (b.signal?.use_htf_adx !== false);
     document.getElementById('sig-cooldown').value = s(b.signal?.trade_cooldown_min ?? 20);
     document.getElementById('sig-trailing').checked = (b.signal?.use_trailing !== false);
     document.getElementById('sig-trail-mult').value = s(b.signal?.trail_atr_mult ?? 2.0);
@@ -6247,6 +6270,7 @@ async function saveSettings() {
         daily_loss_limit_pct: num('sig-daily-limit') || 0,
         use_trend_gate: document.getElementById('sig-trend-gate')?.checked ?? true,
         use_htf_trend: document.getElementById('sig-htf-trend')?.checked ?? true,
+        use_htf_adx: document.getElementById('sig-htf-adx')?.checked ?? true,
         trade_cooldown_min: int('sig-cooldown'),
         use_trailing: document.getElementById('sig-trailing')?.checked ?? true,
         trail_atr_mult: num('sig-trail-mult') || 2.0,
