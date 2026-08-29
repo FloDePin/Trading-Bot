@@ -309,6 +309,38 @@ def save_config(cfg):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
 
+def _redact_config(obj):
+    """Rekursiv alle Secrets aus der Config entfernen (fuer den Log-Download).
+    Zeigt nur, OB ein Geheimnis gesetzt ist ('***gesetzt***'), nie den Wert.
+    Betrifft: api_key/secret, passphrase, Passwort, Token, chat_id, Webhook,
+    sowie alle *_key (finnhub/cryptopanic/coinalyze)."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            kl = str(k).lower()
+            # 'endswith("token")' statt Substring, damit "tokens" (Coin-Liste) sichtbar bleibt.
+            if (kl.endswith("_key") or "secret" in kl or "passphrase" in kl
+                    or "password" in kl or kl.endswith("token") or "chat_id" in kl or "webhook" in kl):
+                out[k] = "***gesetzt***" if v else ""
+            else:
+                out[k] = _redact_config(v)
+        return out
+    if isinstance(obj, list):
+        return [_redact_config(x) for x in obj]
+    return obj
+
+def config_export_text():
+    """Kompletter Settings-Block (ohne Secrets) fuer das Ende des Log-Downloads,
+    damit beim Teilen sofort ersichtlich ist, mit WELCHEN Einstellungen gelaufen wurde."""
+    try:
+        body = json.dumps(_redact_config(load_config()), indent=2, ensure_ascii=False)
+    except Exception as e:
+        body = f"(Config nicht lesbar: {e})"
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    bar = "=" * 70
+    return ("\n\n" + bar + f"\n  KONFIGURATION beim Download ({ts})  -  API-Keys/Secrets entfernt\n"
+            + bar + "\n" + body + "\n")
+
 def _setup_required():
     """True, solange kein Dashboard-Passwort gesetzt ist (Erst-Einrichtung offen).
     In diesem Zustand ist nur der Setup-Assistent erreichbar, alles andere gesperrt."""
@@ -6551,6 +6583,9 @@ class Handler(BaseHTTPRequestHandler):
                     raw = f.read()
             except Exception as e:
                 raw = f"Log nicht lesbar: {e}".encode()
+            # Settings-Block (ohne Secrets) ans Ende haengen -> beim Teilen sofort sichtbar,
+            # mit welchen Einstellungen der Bot lief.
+            raw = raw + config_export_text().encode("utf-8")
             fname = "platform-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".log"
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
