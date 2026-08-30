@@ -1971,7 +1971,11 @@ def run_signal(flag):
                             "fear_greed":fg,"sentiment":sent,
                             "score_parts":{k:v for k,v in parts.items() if v != 0},
                         })
-                    blog("signal",f"{cur}: RSI={rv:.1f} ADX={adx_val:.0f} OB={ob_ratio if ob_ratio else '-'} BB={'low' if price_now<bb_l else 'high' if price_now>bb_u else 'mid'} Score={sc:+d} -> {sig}{_gate}")
+                    # ADX-Anzeige eindeutig: bei aktivem 1h-Gate den Entscheidungswert als
+                    # "ADX1h=..(1m:..)" - so sieht man, dass der 1m-Wert im Chop hochspringt,
+                    # das 1h-Regime aber ruhig bleibt (und warum das Gate auf/zu ist).
+                    _adx_str = f"ADX1h={adx_val:.0f}(1m:{adx_1m:.0f})" if use_htf_adx else f"ADX={adx_val:.0f}"
+                    blog("signal",f"{cur}: RSI={rv:.1f} {_adx_str} OB={ob_ratio if ob_ratio else '-'} BB={'low' if price_now<bb_l else 'high' if price_now>bb_u else 'mid'} Score={sc:+d} -> {sig}{_gate}")
 
                     pos = client.position(sym)
                     with plock:
