@@ -181,6 +181,7 @@ DEFAULT_CONFIG = {
             "use_htf_trend": True,        # Trend-EMA auf dem 1h-Zeitrahmen (statt 1m-Rauschen)
             "use_htf_adx": True,          # ADX-Regime-Gate auf dem 1h-Zeitrahmen (statt 1m-Rauschen)
             "trade_cooldown_min": 20,     # Sperre pro Coin nach dem Schliessen (Minuten, 0 = aus) - Anti-Churn
+            "flip_skip_cooldown": True,   # Reversal sofort handeln: Cooldown-Ausnahme bei Signal-Flip
             "use_trailing": True,         # Trailing-Stop: Stop zieht mit dem Gewinn nach (statt festem TP)
             "trail_atr_mult": 2.0,        # Trailing-Abstand = ATR * dieser Faktor
         },
@@ -1810,6 +1811,7 @@ def run_signal(flag):
             use_htf_trend  = bc.get("use_htf_trend", True)         # Trend-EMA auf 1h-Zeitrahmen
             use_htf_adx    = bc.get("use_htf_adx", True)           # ADX-Regime-Gate auf 1h-Zeitrahmen
             cooldown_min   = max(0, int(bc.get("trade_cooldown_min", 20)))  # Anti-Churn (Minuten)
+            flip_skip_cd   = bc.get("flip_skip_cooldown", True)     # Cooldown-Ausnahme bei Reversal/Flip
             use_trailing   = bc.get("use_trailing", True)          # Trailing-Stop
             trail_mult     = max(0.3, float(bc.get("trail_atr_mult", 2.0)))  # Trailing-Abstand in ATR
             fkey            = _cfg.get("finnhub_key","")
@@ -2120,7 +2122,17 @@ def run_signal(flag):
                                     "win_streak":win_streak, "loss_streak":loss_streak})
                             open_pos_count = max(0, open_pos_count - 1)
                             open_positions[:] = [(s,d) for (s,d) in open_positions if s != sym]
-                            if cooldown_min > 0: cooldown_until[sym] = time.time() + cooldown_min*60
+                            # Cooldown NICHT setzen, wenn das aktuelle Signal der geschlossenen
+                            # Position exakt entgegensteht (Reversal/Flip) - sonst sperrt sich der
+                            # Bot vom sofortigen Gegen-Trade aus, den er gerade erkannt hat. Der
+                            # 1h-Trend-Gate macht Flips selten+echt (Preis muss die 1h-EMA kreuzen),
+                            # daher kein Churn-Risiko.
+                            is_flip = flip_skip_cd and ((ps == "LONG" and sig == "SHORT")
+                                                        or (ps == "SHORT" and sig == "LONG"))
+                            if cooldown_min > 0 and not is_flip:
+                                cooldown_until[sym] = time.time() + cooldown_min*60
+                            elif is_flip:
+                                blog("signal", f"{cur}: Reversal {ps}->{sig} - Cooldown uebersprungen", "TRADE")
                             trail.pop(sym, None)   # Position weg -> Trail verwerfen
                             blog("signal", f"{cur}: {ps} geschlossen | PnL {net:+.2f}", "TRADE")
                         if sig in ("LONG","SHORT") and not blackout:
@@ -3887,6 +3899,8 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="settings-note" data-i18n="hint_htf_adx">Berechnet den ADX (Regime-Mass) auf 1-Stunden-Kerzen statt 1m. Der 1m-ADX springt im Chop kurz ueber die Schwelle und lockt Fehl-Trades an; der 1h-ADX misst das ECHTE Makro-Momentum. Effekt: der Signal-Bot handelt NUR bei echtem Trend (1h-ADX >= Min. ADX) und steht im Seitwaerts-Chop still - dort verdient stattdessen der Grid. Nutzt denselben "Min. ADX"-Wert. Idle im Chop ist gewollt (schuetzt Kapital). Empfohlen AN.</div>
         <div class="field-row"><label data-i18n="lbl_cooldown">Cooldown pro Coin (Min., 0 = aus)</label><input type="number" id="sig-cooldown" placeholder="20" min="0" max="240"></div>
         <div class="settings-note" data-i18n="hint_cooldown">Nach dem Schliessen einer Position ist derselbe Coin so lange gesperrt. Stoppt staendiges Rein/Raus (Anti-Churn).</div>
+        <div class="field-row"><label data-i18n="lbl_flip_cd">Reversal sofort handeln</label><input type="checkbox" id="sig-flip-cd" style="width:auto"></div>
+        <div class="settings-note" data-i18n="hint_flip_cd">Ausnahme vom Cooldown: dreht das Signal exakt in die Gegenrichtung (Flip, z.B. Short -> Long), darf der Bot den Reversal-Trade SOFORT eroeffnen, statt in seinen eigenen Cooldown zu rennen. Sicher, weil ein Flip durch das 1h-Trend-Gate ohnehin nur bei echtem Regimewechsel passiert. Empfohlen AN.</div>
         <div class="field-row"><label data-i18n="lbl_trailing">Trailing-Stop</label><input type="checkbox" id="sig-trailing" style="width:auto"></div>
         <div class="field-row"><label data-i18n="lbl_trail_mult">Trailing-Abstand (ATR-Faktor)</label><input type="number" id="sig-trail-mult" placeholder="2.0" min="0.3" max="10" step="0.1"></div>
         <div class="settings-note" data-i18n="hint_trailing">Statt festem Take-Profit zieht der Stop mit dem Gewinn nach (Abstand = ATR × Faktor) und laesst Gewinner im Trend laufen. Kleiner = enger/sichert frueher, groesser = mehr Raum. Empfohlen AN.</div>
@@ -4210,6 +4224,7 @@ const STRINGS = {
     lbl_htf_adx:'ADX-Regime auf 1h-Zeitrahmen', hint_htf_adx:'Berechnet den ADX (Regime-Mass) auf 1-Stunden-Kerzen statt 1m. Der 1m-ADX springt im Chop kurz ueber die Schwelle und lockt Fehl-Trades an; der 1h-ADX misst das ECHTE Makro-Momentum. Effekt: der Signal-Bot handelt NUR bei echtem Trend (1h-ADX >= Min. ADX) und steht im Seitwaerts-Chop still - dort verdient stattdessen der Grid. Nutzt denselben "Min. ADX"-Wert. Idle im Chop ist gewollt (schuetzt Kapital). Empfohlen AN.',
     lbl_cooldown:'Cooldown pro Coin (Min., 0 = aus)',
     hint_cooldown:'Nach dem Schliessen einer Position ist derselbe Coin so lange gesperrt. Stoppt staendiges Rein/Raus (Anti-Churn).',
+    lbl_flip_cd:'Reversal sofort handeln', hint_flip_cd:'Ausnahme vom Cooldown: dreht das Signal exakt in die Gegenrichtung (Flip, z.B. Short -> Long), darf der Bot den Reversal-Trade SOFORT eroeffnen, statt in seinen eigenen Cooldown zu rennen. Sicher, weil ein Flip durch das 1h-Trend-Gate ohnehin nur bei echtem Regimewechsel passiert. Empfohlen AN.',
     lbl_trailing:'Trailing-Stop', lbl_trail_mult:'Trailing-Abstand (ATR-Faktor)',
     hint_trailing:'Statt festem Take-Profit zieht der Stop mit dem Gewinn nach (Abstand = ATR × Faktor) und laesst Gewinner im Trend laufen. Kleiner = enger/sichert frueher, groesser = mehr Raum. Empfohlen AN.',
     grid_oneway_warn:'<b>WICHTIG:</b> Bitget Sub-Account muss auf <b>One-Way Mode</b> stehen!<br>Bitget App: Futures-Handel -> Einstellungen -> Positionsmodus -> One-Way Mode.<br>Im Hedge-Modus oeffnet der Grid Bot ungewollt gegenlaeutige Positionen.',
@@ -4380,6 +4395,7 @@ const STRINGS = {
     lbl_htf_adx:'ADX regime on 1h timeframe', hint_htf_adx:'Computes ADX (the regime measure) on 1-hour candles instead of 1m. The 1m ADX briefly spikes above the threshold in chop and lures bad trades; the 1h ADX measures the REAL macro momentum. Effect: the signal bot trades ONLY in a genuine trend (1h ADX >= Min ADX) and stays idle in sideways chop - where the grid earns instead. Uses the same "Min ADX" value. Being idle in chop is intended (protects capital). Recommended ON.',
     lbl_cooldown:'Cooldown per coin (min, 0 = off)',
     hint_cooldown:'After closing a position the same coin is locked for this long. Stops constant in/out (anti-churn).',
+    lbl_flip_cd:'Trade reversals immediately', hint_flip_cd:'Cooldown exception: when the signal flips to the exact opposite direction (e.g. short -> long), the bot may open the reversal trade IMMEDIATELY instead of running into its own cooldown. Safe because a flip only happens on a real regime change thanks to the 1h trend gate. Recommended ON.',
     lbl_trailing:'Trailing stop', lbl_trail_mult:'Trailing distance (ATR factor)',
     hint_trailing:'Instead of a fixed take-profit the stop trails the price (distance = ATR × factor), letting winners run in a trend. Smaller = tighter/locks earlier, larger = more room. Recommended ON.',
     grid_oneway_warn:'<b>IMPORTANT:</b> the Bitget sub-account must be set to <b>One-Way Mode</b>!<br>Bitget app: Futures trading -> Settings -> Position mode -> One-Way Mode.<br>In Hedge mode the Grid Bot unintentionally opens opposing positions.',
@@ -6229,6 +6245,7 @@ function fillSettingsForm(state) {
     document.getElementById('sig-htf-trend').checked = (b.signal?.use_htf_trend !== false);
     document.getElementById('sig-htf-adx').checked = (b.signal?.use_htf_adx !== false);
     document.getElementById('sig-cooldown').value = s(b.signal?.trade_cooldown_min ?? 20);
+    document.getElementById('sig-flip-cd').checked = (b.signal?.flip_skip_cooldown !== false);
     document.getElementById('sig-trailing').checked = (b.signal?.use_trailing !== false);
     document.getElementById('sig-trail-mult').value = s(b.signal?.trail_atr_mult ?? 2.0);
     document.getElementById('grd-key').value   = s(b.grid?.api_key);
@@ -6308,6 +6325,7 @@ async function saveSettings() {
         use_htf_trend: document.getElementById('sig-htf-trend')?.checked ?? true,
         use_htf_adx: document.getElementById('sig-htf-adx')?.checked ?? true,
         trade_cooldown_min: int('sig-cooldown'),
+        flip_skip_cooldown: document.getElementById('sig-flip-cd')?.checked ?? true,
         use_trailing: document.getElementById('sig-trailing')?.checked ?? true,
         trail_atr_mult: num('sig-trail-mult') || 2.0,
       },
