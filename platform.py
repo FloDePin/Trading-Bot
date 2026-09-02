@@ -233,6 +233,18 @@ def _prompt_first_run_credentials():
         print(f"\n  Eingabe abgebrochen - generiertes Passwort: {pw}")
         return "admin", pw
 
+def _atomic_write_json(path, obj, ensure_ascii=True):
+    """JSON atomar schreiben: erst in eine .tmp-Datei (+ fsync), dann os.replace().
+    Verhindert eine abgeschnittene/korrupte Datei, wenn der Prozess mitten im Schreiben
+    stirbt (Crash/Stromausfall) - sonst verliert z.B. der Grid nach Neustart seinen Merker
+    oder die Config wird unlesbar. os.replace ist auf demselben Dateisystem atomar."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=ensure_ascii)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
 def load_config():
     global _credentials_just_created, _setup_notice_logged
     is_new = not os.path.exists(CONFIG_FILE)
@@ -274,8 +286,7 @@ def load_config():
             log.warning("  Dort Benutzername + Passwort festlegen (Setup-Assistent).")
             log.warning("="*55)
     if needs_save:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(data, f, indent=2)
+        _atomic_write_json(CONFIG_FILE, data)
         if is_new:
             log.info(f"Config erstellt: {CONFIG_FILE}")
     return data
@@ -307,8 +318,7 @@ def _verify_login_at_startup(cfg):
     sys.exit(1)
 
 def save_config(cfg):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=2)
+    _atomic_write_json(CONFIG_FILE, cfg)
 
 def _redact_config(obj):
     """Rekursiv alle Secrets aus der Config entfernen (fuer den Log-Download).
@@ -374,8 +384,7 @@ def dca_save_state(symbol, total_inv, total_qty, buy_count, last_buy):
                     data = json.load(f)
             data[symbol] = {"total_inv": round(total_inv, 6), "total_qty": round(total_qty, 8),
                             "buy_count": buy_count, "last_buy": last_buy}
-            with open(DCA_STATE_FILE, "w") as f:
-                json.dump(data, f, indent=2)
+            _atomic_write_json(DCA_STATE_FILE, data)
     except Exception as e:
         log.debug(f"dca_save_state: {e}")
 
@@ -403,8 +412,7 @@ def grid_save_state(key, data):
                 d.pop(key, None)
             else:
                 d[key] = data
-            with open(GRID_STATE_FILE, "w") as f:
-                json.dump(d, f, indent=2)
+            _atomic_write_json(GRID_STATE_FILE, d)
     except Exception as e:
         log.debug(f"grid_save_state: {e}")
 
