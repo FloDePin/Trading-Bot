@@ -186,6 +186,7 @@ DEFAULT_CONFIG = {
             "use_trend_gate": True,       # harter Trend-Filter: ueber EMA nur Long, darunter nur Short
             "use_htf_trend": True,        # Trend-EMA auf dem 1h-Zeitrahmen (statt 1m-Rauschen)
             "use_htf_adx": True,          # ADX-Regime-Gate auf dem 1h-Zeitrahmen (statt 1m-Rauschen)
+            "signal_timeframe": "1m",     # Basis-Zeitrahmen fuer Indikatoren+ATR+Stops (1m/5m/15m)
             "trade_cooldown_min": 20,     # Sperre pro Coin nach dem Schliessen (Minuten, 0 = aus) - Anti-Churn
             "flip_skip_cooldown": True,   # Reversal sofort handeln: Cooldown-Ausnahme bei Signal-Flip
             "use_trailing": True,         # Trailing-Stop: Stop zieht mit dem Gewinn nach (statt festem TP)
@@ -1796,6 +1797,7 @@ def run_signal(flag):
             _cfg = load_config(); bc = _cfg["bots"]["signal"]
             thresh          = bc.get("signal_threshold", 3)
             check           = bc.get("check_interval", 30)
+            signal_tf       = bc.get("signal_timeframe", "1m")   # Basis-Zeitrahmen (1m/5m/15m)
             risk_pct        = bc.get("risk_pct", 3.0)
             use_risk_pct    = bc.get("use_risk_pct", True)
             usdt_pt         = bc.get("usdt_per_trade", 30)
@@ -1894,7 +1896,7 @@ def run_signal(flag):
             cycle_unreal = 0.0   # unrealisierter PnL aller offenen Signal-Positionen dieses Zyklus
             for sym in tokens:
                 try:
-                    _, highs, lows, closes, vols = client.klines(sym, 100)
+                    _, highs, lows, closes, vols = client.klines(sym, 100, granularity=signal_tf)
                     if len(closes) < 30: continue
                     rv       = rsi(closes, 14)
                     ef       = ema(closes, 8)
@@ -1990,7 +1992,7 @@ def run_signal(flag):
                     # ADX-Anzeige eindeutig: bei aktivem 1h-Gate den Entscheidungswert als
                     # "ADX1h=..(1m:..)" - so sieht man, dass der 1m-Wert im Chop hochspringt,
                     # das 1h-Regime aber ruhig bleibt (und warum das Gate auf/zu ist).
-                    _adx_str = f"ADX1h={adx_val:.0f}(1m:{adx_1m:.0f})" if use_htf_adx else f"ADX={adx_val:.0f}"
+                    _adx_str = f"ADX1h={adx_val:.0f}({signal_tf}:{adx_1m:.0f})" if use_htf_adx else f"ADX={adx_val:.0f}"
                     blog("signal",f"{cur}: RSI={rv:.1f} {_adx_str} OB={ob_ratio if ob_ratio else '-'} BB={'low' if price_now<bb_l else 'high' if price_now>bb_u else 'mid'} Score={sc:+d} -> {sig}{_gate}")
 
                     pos = client.position(sym)
@@ -3866,6 +3868,8 @@ body.live-mode::after{content:'LIVE';position:fixed;bottom:16px;right:16px;
         <div class="field-row"><label data-i18n="lbl_autostart">Auto-Start nach Neustart</label><input type="checkbox" id="sig-autostart" style="width:auto"></div>
         <div class="field-row"><label data-i18n="lbl_coins">Coins (kommagetrennt)</label><input type="text" id="sig-tokens" placeholder="SOLUSDT, ETHUSDT, DOGEUSDT"></div>
         <div class="settings-note" data-i18n="hint_coins">Welche Coins der Signal-Bot handelt. Kaputte Demo-Coins (z.B. XRP) einfach weglassen. Änderung greift beim nächsten Bot-Start.</div>
+        <div class="field-row"><label data-i18n="lbl_sig_tf">Signal-Zeitrahmen</label><select id="sig-timeframe"><option value="1m">1m</option><option value="5m">5m</option><option value="15m">15m</option></select></div>
+        <div class="settings-note" data-i18n="hint_sig_tf">Basis-Zeitrahmen fuer ALLE Indikatoren, ATR und Stops. 1m ist sehr verrauscht: im grindenden Trend churnt der Bot rein/raus und die ATR-Stops sind absolut winzig. 5m oder 15m glaettet die Signale UND macht die ATR-Stops breiter (echter Raum, ohne mehr Risiko - die Positionsgroesse skaliert ueber risk_pct mit). Empfohlen 5m. Die 1h-Trend/ADX-Gates bleiben unabhaengig davon auf 1h.</div>
         <div class="field-row"><label>Leverage (1-10)</label><input type="number" id="sig-lever" placeholder="3" min="1" max="10"></div>
         <div class="field-row"><label data-i18n="lbl_risk_trade">Risiko pro Trade (%)</label><input type="number" id="sig-risk-pct" placeholder="3.0" step="0.5" min="0.5" max="10"></div>
         <div class="field-row"><label data-i18n="lbl_sl_mult">Stop-Loss Weite (ATR-Faktor)</label><input type="number" id="sig-sl-mult" placeholder="1.5" step="0.1" min="0.5" max="6"></div>
@@ -4222,6 +4226,7 @@ const STRINGS = {
     lbl_sl_mult:'Stop-Loss Weite (ATR-Faktor)',
     hint_sl_mult:'Abstand des Einstiegs-Stops = ATR × Faktor. Größer = mehr Luft, weniger Whipsaw (dafür größerer Verlust je Fehltrade). 1,5 = eng, 2,5–3 = geduldig.',
     lbl_coins:'Coins (kommagetrennt)',
+    lbl_sig_tf:'Signal-Zeitrahmen', hint_sig_tf:'Basis-Zeitrahmen fuer ALLE Indikatoren, ATR und Stops. 1m ist sehr verrauscht: im grindenden Trend churnt der Bot rein/raus und die ATR-Stops sind absolut winzig. 5m oder 15m glaettet die Signale UND macht die ATR-Stops breiter (echter Raum, ohne mehr Risiko - die Positionsgroesse skaliert ueber risk_pct mit). Empfohlen 5m. Die 1h-Trend/ADX-Gates bleiben unabhaengig davon auf 1h.',
     hint_coins:'Welche Coins der Signal-Bot handelt. Kaputte Demo-Coins (z.B. XRP) einfach weglassen. Änderung greift beim nächsten Bot-Start.',
     lbl_ob:'Order-Book-Kaufdruck',
     note_ob:'Order-Book-Kaufdruck: bezieht den Kauf-/Verkaufsdruck aus dem Live-Orderbuch als zusaetzlichen Signal-Faktor mit ein. Fail-open, wenn keine Daten verfuegbar sind.',
@@ -4393,6 +4398,7 @@ const STRINGS = {
     lbl_sl_mult:'Stop-loss width (ATR factor)',
     hint_sl_mult:'Entry stop distance = ATR × factor. Larger = more room, less whipsaw (but bigger loss per bad trade). 1.5 = tight, 2.5–3 = patient.',
     lbl_coins:'Coins (comma-separated)',
+    lbl_sig_tf:'Signal timeframe', hint_sig_tf:'Base timeframe for ALL indicators, ATR and stops. 1m is very noisy: in a grinding trend the bot churns in/out and the ATR stops are tiny in absolute terms. 5m or 15m smooths the signals AND widens the ATR stops (real room, no extra risk - position size scales via risk_pct). Recommended 5m. The 1h trend/ADX gates stay on 1h regardless.',
     hint_coins:'Which coins the Signal bot trades. Just drop broken demo coins (e.g. XRP). Change takes effect on the next bot start.',
     lbl_ob:'Order-book buy pressure',
     note_ob:'Order-book buy pressure: includes buy/sell pressure from the live order book as an extra signal factor. Fail-open when no data is available.',
@@ -6244,6 +6250,7 @@ function fillSettingsForm(state) {
     document.getElementById('sig-adx-gate').checked  = (b.signal?.use_adx_gate !== false);
     document.getElementById('sig-sl-mult').value     = s(b.signal?.atr_sl_mult ?? 1.5);
     document.getElementById('sig-tokens').value      = (b.signal?.tokens || []).join(', ');
+    document.getElementById('sig-timeframe').value   = b.signal?.signal_timeframe || '1m';
     document.getElementById('sig-ob-signal').checked = (b.signal?.use_orderbook_signal !== false);
     const sf = k => document.getElementById('sig-f-'+k); const sg = b.signal||{};
     sf('ema').checked=(sg.use_ema!==false); sf('rsi').checked=(sg.use_rsi!==false);
@@ -6308,6 +6315,7 @@ async function saveSettings() {
         passphrase:       val('sig-pass'),
         autostart:        document.getElementById('sig-autostart')?.checked || false,
         tokens:           val('sig-tokens').split(',').map(t=>t.trim().toUpperCase()).filter(Boolean).map(t=>t.endsWith('USDT')?t:t+'USDT'),
+        signal_timeframe: document.getElementById('sig-timeframe')?.value || '1m',
         leverage:         int('sig-lever')    || 3,
         risk_pct:         num('sig-risk-pct') || 3.0,
         atr_sl_mult:      num('sig-sl-mult') || 1.5,
