@@ -14,18 +14,24 @@ from logging.handlers import RotatingFileHandler
 # ─────────────────────────────────────────────
 #  LOGGING  (max 5 MB, 2 Backups = max 15 MB gesamt)
 # ─────────────────────────────────────────────
+_log_handlers = [
+    RotatingFileHandler(
+        "platform.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=2,
+        encoding="utf-8"
+    )
+]
+# StreamHandler NUR im interaktiven Terminal. Unter systemd leitet
+# StandardOutput=append:platform.log den stdout in DIESELBE Datei um - zusammen mit dem
+# RotatingFileHandler stuende sonst jede Zeile doppelt im Log (2x Groesse). isatty() trennt
+# den manuellen Terminal-Start (will Konsolenausgabe) vom Dienst-Betrieb sauber ab.
+if sys.stderr.isatty():
+    _log_handlers.append(logging.StreamHandler())
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
-    handlers=[
-        RotatingFileHandler(
-            "platform.log",
-            maxBytes=5 * 1024 * 1024,
-            backupCount=2,
-            encoding="utf-8"
-        ),
-        logging.StreamHandler()
-    ]
+    handlers=_log_handlers
 )
 log = logging.getLogger("Platform")
 

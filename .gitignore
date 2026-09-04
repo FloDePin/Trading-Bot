@@ -3,6 +3,11 @@ platform_config.json
 platform.db
 dca_state.json
 grid_state.json
+Bot.txt
+*.tmp
+secrets.json
+.env.local
+.env.*.local
 
 # Logs
 *.log
